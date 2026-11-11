@@ -1,0 +1,98 @@
+[project]
+name = "payments-processing"
+version = "0.1.0"
+description = "Асинхронный сервис процессинга платежей"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.20.1",
+    "asyncpg>=0.32.0",
+    "dependency-injector>=4.49.1",
+    "fastapi>=0.162.4",
+    "faststream[cli,rabbit]>=0.7.8",
+    "httpx>=0.28.1",
+    "pydantic>=2",
+    "pydantic-settings>=2.16.2",
+    "python-json-logger>=4.2.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "typer>=0.27.1",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
+    "pytest-cov>=7.1.0",
+    "pytest-mock>=3.17.0",
+    "ruff>=0.17.4",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+src = ["src"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W", "C90", "I", "N", "UP", "YTT", "ASYNC", "S", "B", "C4", "T10", "ISC", "ICN", "PIE", "T20", "PT", "Q",
+    "RET", "SLF", "SIM", "ERA", "TRY", "PYI", "PERF", "LOG", "A001",
+    "RUF008", "RUF009", "RUF012", "RUF013", "RUF015", "RUF019", "RUF100", "RUF200",
+]
+unfixable = ["ERA"]
+ignore = ["B008", "B904", "TRY400", "TRY401", "ISC001", "SIM105", "S104", "N818", "RET504", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**/*.py" = ["S", "SLF"]
+"**/alembic/versions/*" = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = true
+mark-parentheses = true
+
+[tool.mypy]
+python_version = "3.13"
+mypy_path = "src"
+exclude = "(^|/)tests?/|(^|/)alembic/"
+strict_optional = true
+strict_equality = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+disallow_untyped_calls = true
+disallow_incomplete_defs = true
+ignore_missing_imports = true
+follow_imports = "normal"
+show_error_codes = true
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+# SQLAlchemy в асинхронном режиме работает через greenlet, без этого coverage теряет строки после await.
+concurrency = ["greenlet", "thread"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "raise NotImplementedError"]
