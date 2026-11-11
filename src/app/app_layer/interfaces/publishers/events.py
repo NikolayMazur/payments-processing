@@ -11,3 +11,8 @@ class AbstractEventPublisher(ABC):
     @abstractmethod
     async def publish(self, record: Outbox) -> None:
         raise NotImplementedError
+
+    @abstractmethod
+    async def ping(self) -> bool:
+        """Проверяет, что брокер сейчас доступен."""
+        raise NotImplementedError

@@ -14,5 +14,6 @@ class Outbox(BaseModel):
     routing_key: str
     event_key: str
     payload: dict[str, Any]
+    headers: dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     processed_at: datetime | None = None

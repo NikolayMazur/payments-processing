@@ -12,6 +12,8 @@ class DatabaseSettings(BaseModel):
 class APISettings(BaseModel):
     ROOT_PREFIX: str = "/api"
     DOCS_ENABLED: bool = True
+    MAX_METADATA_BYTES: int = Field(default=16 * 1024, gt=0)
+    REQUEST_ID_HEADER: str = "X-Request-ID"
 
 
 class AuthSettings(BaseModel):
@@ -36,12 +38,16 @@ class RabbitSettings(BaseModel):
     MAX_ATTEMPTS: int = Field(default=3, gt=0)
     RETRY_BASE_DELAY_SEC: int = Field(default=2, gt=0)
     RETRY_HEADER: str = "x-retry-attempt"
+    # Сколько ждать обработчики при остановке. Должно покрывать ответ шлюза и таймаут вебхука.
+    GRACEFUL_TIMEOUT_SEC: float = Field(default=15.0, gt=0)
 
 
 class OutboxSettings(BaseModel):
     BATCH_SIZE: int = Field(default=100, gt=0)
     POLL_INTERVAL_SEC: float = Field(default=0.5, gt=0)
     MAX_ERROR_DELAY_SEC: float = Field(default=10.0, gt=0)
+    RETENTION_DAYS: int = Field(default=7, ge=0)
+    CLEAN_BATCH_SIZE: int = Field(default=1000, gt=0)
 
 
 class GatewaySettings(BaseModel):
@@ -52,8 +58,21 @@ class GatewaySettings(BaseModel):
 
 class WebhookSettings(BaseModel):
     TIMEOUT_SEC: float = Field(default=5.0, gt=0)
+    # Секрет в формате Standard Webhooks: whsec_<base64>. Строка без префикса берётся как есть.
     SECRET: str = ""
-    SIGNATURE_HEADER: str = "X-Signature"
+
+
+class MetricsSettings(BaseModel):
+    ENABLED: bool = True
+    # Порт, на котором relay и консьюмер отдают метрики. API отдаёт их на своём порту по /metrics.
+    PORT: int = 9000
+    COLLECT_INTERVAL_SEC: float = Field(default=10.0, gt=0)
+
+
+class HeartbeatSettings(BaseModel):
+    PATH: str = "/tmp/payments-heartbeat"  # noqa: S108
+    INTERVAL_SEC: float = Field(default=5.0, gt=0)
+    MAX_AGE_SEC: float = Field(default=30.0, gt=0)
 
 
 class Config(BaseSettings):
@@ -69,6 +88,8 @@ class Config(BaseSettings):
     OUTBOX: OutboxSettings = OutboxSettings()
     GATEWAY: GatewaySettings = GatewaySettings()
     WEBHOOK: WebhookSettings = WebhookSettings()
+    METRICS: MetricsSettings = MetricsSettings()
+    HEARTBEAT: HeartbeatSettings = HeartbeatSettings()
 
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
 

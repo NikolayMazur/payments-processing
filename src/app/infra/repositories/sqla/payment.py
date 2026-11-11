@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -63,6 +64,12 @@ class PaymentRepository(AbcPaymentRepository):
         orm = (await self._session.execute(stmt)).scalar_one_or_none()
         return self._map_model_to_entity(orm) if orm else None
 
+    async def register_webhook_attempt(self, payment_id: UUID, delivered_at: datetime | None) -> None:
+        values: dict[str, Any] = {"webhook_attempts": PaymentOrm.webhook_attempts + 1}
+        if delivered_at is not None:
+            values["webhook_delivered_at"] = delivered_at
+        await self._session.execute(update(PaymentOrm).where(PaymentOrm.id == payment_id).values(**values))
+
     @staticmethod
     def _map_model_to_entity(orm: PaymentOrm) -> Payment:
         return Payment(
@@ -79,4 +86,6 @@ class PaymentRepository(AbcPaymentRepository):
             created_at=orm.created_at,
             updated_at=orm.updated_at,
             processed_at=orm.processed_at,
+            webhook_attempts=orm.webhook_attempts,
+            webhook_delivered_at=orm.webhook_delivered_at,
         )

@@ -2,6 +2,8 @@ import httpx
 from dependency_injector import containers, providers
 
 from app.app_layer.services.health.health_service import HealthService
+from app.app_layer.services.outbox.clean_service import CleanOutboxService
+from app.app_layer.services.outbox.collect_metrics_service import CollectQueueMetricsService
 from app.app_layer.services.outbox.send_service import SendOutboxService
 from app.app_layer.services.payments.create_payment_service import CreatePaymentService
 from app.app_layer.services.payments.get_payment_service import GetPaymentService
@@ -9,8 +11,10 @@ from app.app_layer.services.payments.process_payment_service import ProcessPayme
 from app.config import Config, config
 from app.infra.db.database import Database
 from app.infra.gateways.emulated import EmulatedPaymentGateway
+from app.infra.heartbeat import Heartbeat
 from app.infra.http.webhook.client import WebhookClient
 from app.infra.rabbit.broker import broker
+from app.infra.rabbit.dead_letters import RabbitDeadLetterQueue
 from app.infra.rabbit.publisher import RabbitEventPublisher
 from app.infra.unit_of_work.sqla import Uow
 
@@ -51,6 +55,15 @@ class Container(containers.DeclarativeContainer):
         uow=db.container.uow,
         payment_gateway=clients.container.payment_gateway,
         webhook_client=clients.container.webhook_client,
+    )
+    dead_letter_queue = providers.Factory(RabbitDeadLetterQueue, broker=rabbit_broker, settings=config.provided.RABBIT)
+    heartbeat = providers.Singleton(Heartbeat, settings=config.provided.HEARTBEAT)
+
+    clean_outbox_service = providers.Factory(CleanOutboxService, uow=db.container.uow, settings=config.provided.OUTBOX)
+    collect_queue_metrics_service = providers.Factory(
+        CollectQueueMetricsService,
+        uow=db.container.uow,
+        dead_letter_queue=dead_letter_queue,
     )
     send_outbox_service = providers.Factory(
         SendOutboxService,

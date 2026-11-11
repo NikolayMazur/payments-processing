@@ -2,10 +2,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.app_layer.interfaces.repositories.outbox import AbcOutboxRepository
+from app.app_layer.interfaces.repositories.outbox import AbcOutboxRepository, OutboxPendingStatsDTO
 from app.domain.outbox.entity import Outbox
 from app.domain.outbox.enums import OutboxStatusEnum
 from app.infra.repositories.sqla.models import OutboxOrm
@@ -37,3 +37,18 @@ class OutboxRepository(AbcOutboxRepository):
             .where(OutboxOrm.id.in_(ids))
             .values(status=OutboxStatusEnum.SUCCESS, processed_at=processed_at),
         )
+
+    async def get_pending_stats(self) -> OutboxPendingStatsDTO:
+        stmt = select(func.count(), func.min(OutboxOrm.created_at)).where(OutboxOrm.status == OutboxStatusEnum.PENDING)
+        count, oldest_created_at = (await self._session.execute(stmt)).one()
+        return OutboxPendingStatsDTO(count=count, oldest_created_at=oldest_created_at)
+
+    async def delete_processed_before(self, threshold: datetime, limit: int) -> int:
+        batch = (
+            select(OutboxOrm.id)
+            .where(OutboxOrm.status == OutboxStatusEnum.SUCCESS, OutboxOrm.processed_at < threshold)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        stmt = delete(OutboxOrm).where(OutboxOrm.id.in_(batch)).returning(OutboxOrm.id)
+        return len((await self._session.execute(stmt)).scalars().all())

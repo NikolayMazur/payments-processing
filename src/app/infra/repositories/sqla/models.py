@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import TEXT, Index, Numeric, String, func, text
+from sqlalchemy import TEXT, CheckConstraint, Index, Integer, Numeric, String, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -13,6 +13,7 @@ from app.infra.repositories.sqla.base import Base, CreatedAtMixin, IDMixin
 
 class PaymentOrm(Base, IDMixin, CreatedAtMixin):
     __tablename__ = "payments"
+    __table_args__ = (CheckConstraint("amount > 0", name="amount_positive"),)
 
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), comment="Сумма платежа")
     currency: Mapped[CurrencyEnum] = mapped_column(comment="Валюта")
@@ -31,6 +32,16 @@ class PaymentOrm(Base, IDMixin, CreatedAtMixin):
     failure_reason: Mapped[str | None] = mapped_column(TEXT, comment="Причина отказа шлюза")
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now(), sort_order=100)
     processed_at: Mapped[datetime | None] = mapped_column(comment="Момент получения итога от шлюза", sort_order=100)
+    webhook_attempts: Mapped[int] = mapped_column(
+        Integer,
+        server_default="0",
+        comment="Сколько раз пытались доставить вебхук",
+        sort_order=100,
+    )
+    webhook_delivered_at: Mapped[datetime | None] = mapped_column(
+        comment="Момент, когда получатель подтвердил вебхук",
+        sort_order=100,
+    )
 
 
 class OutboxOrm(Base, IDMixin, CreatedAtMixin):
@@ -42,4 +53,9 @@ class OutboxOrm(Base, IDMixin, CreatedAtMixin):
     routing_key: Mapped[str] = mapped_column(TEXT, comment="Ключ маршрутизации")
     event_key: Mapped[str] = mapped_column(TEXT, comment="Идентификатор агрегата, к которому относится событие")
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, comment="Тело события")
+    headers: Mapped[dict[str, str]] = mapped_column(
+        JSONB,
+        server_default=text("'{}'::jsonb"),
+        comment="Заголовки сообщения",
+    )
     processed_at: Mapped[datetime | None] = mapped_column(comment="Момент публикации в брокер", sort_order=100)

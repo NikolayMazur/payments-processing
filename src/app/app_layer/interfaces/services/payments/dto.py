@@ -35,6 +35,8 @@ class PaymentOutputDTO(BaseModel):
     failure_reason: str | None
     created_at: datetime
     processed_at: datetime | None
+    webhook_attempts: int
+    webhook_delivered_at: datetime | None
 
 
 class ProcessPaymentInputDTO(BaseModel):

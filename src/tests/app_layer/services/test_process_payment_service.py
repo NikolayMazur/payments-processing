@@ -49,6 +49,8 @@ class TestProcessPaymentService:
         assert webhook.amount == payment.amount
         assert webhook.metadata == payment.metadata
         assert webhook.processed_at == saved.processed_at
+        assert saved.webhook_attempts == 1
+        assert saved.webhook_delivered_at is not None
 
     async def test_declined_charge_saved_as_failed(self, payment_factory: PaymentFactory) -> None:
         payment = await payment_factory.payment()
@@ -76,6 +78,8 @@ class TestProcessPaymentService:
             saved = await self.uow.payment.get_by_id(payment.id)
         assert saved is not None
         assert saved.status is PaymentStatusEnum.SUCCEEDED
+        assert saved.webhook_attempts == 1
+        assert saved.webhook_delivered_at is None
 
     async def test_retry_does_not_charge_again(self, payment_factory: PaymentFactory) -> None:
         payment = await payment_factory.payment()
@@ -89,6 +93,25 @@ class TestProcessPaymentService:
         assert self.webhook_client.send.await_count == 2
         first, second = (call.kwargs["data"] for call in self.webhook_client.send.await_args_list)
         assert first == second
+        async with self.uow:
+            saved = await self.uow.payment.get_by_id(payment.id)
+        assert saved is not None
+        assert saved.webhook_attempts == 2
+        assert saved.webhook_delivered_at is not None
+
+    async def test_duplicate_message_does_not_resend_delivered_webhook(self, payment_factory: PaymentFactory) -> None:
+        payment = await payment_factory.payment()
+        await self.service.process(ProcessPaymentInputDTO(payment_id=payment.id))
+
+        # Брокер доставил то же сообщение второй раз, например после потери подтверждения.
+        await self.service.process(ProcessPaymentInputDTO(payment_id=payment.id))
+
+        self.payment_gateway.charge.assert_awaited_once()
+        self.webhook_client.send.assert_awaited_once()
+        async with self.uow:
+            saved = await self.uow.payment.get_by_id(payment.id)
+        assert saved is not None
+        assert saved.webhook_attempts == 1
 
     async def test_concurrent_handler_result_is_not_overwritten(self, payment_factory: PaymentFactory) -> None:
         payment = await payment_factory.payment()

@@ -3,11 +3,13 @@ import json
 from decimal import Decimal
 from logging import getLogger
 
+from app.app_layer import metrics
 from app.app_layer.interfaces.services.payments.dto import CreatePaymentInputDTO, CreatePaymentOutputDTO
 from app.app_layer.interfaces.services.payments.exceptions import IdempotencyKeyConflictError
 from app.app_layer.interfaces.services.payments.services import AbstractCreatePaymentService
 from app.app_layer.interfaces.unit_of_work.sql import AbcUnitOfWork
 from app.config import RabbitSettings
+from app.context import REQUEST_ID_MESSAGE_HEADER, get_request_id
 from app.domain.outbox.entity import Outbox
 from app.domain.payments.entity import Payment
 from app.domain.payments.events import PaymentCreatedEvent
@@ -38,11 +40,15 @@ class CreatePaymentService(AbstractCreatePaymentService):
         )
         async with self._uow:
             # Платёж и событие пишутся одной транзакцией: либо появятся оба, либо ни одного.
-            if await self._uow.payment.create_if_absent(payment):
+            if created := await self._uow.payment.create_if_absent(payment):
                 await self._uow.outbox.create_from_entity(self._build_outbox(payment))
-                return self._build_response(payment)
-            existing = await self._uow.payment.get_by_idempotency_key(data.idempotency_key)
+            else:
+                existing = await self._uow.payment.get_by_idempotency_key(data.idempotency_key)
 
+        if created:
+            metrics.payments_created.labels(currency=payment.currency.value).inc()
+            logger.info("Payment %s accepted", payment.id)
+            return self._build_response(payment)
         if existing is None or existing.request_hash != payment.request_hash:
             raise IdempotencyKeyConflictError
         logger.info("Payment %s returned by idempotency key", existing.id)
@@ -70,6 +76,7 @@ class CreatePaymentService(AbstractCreatePaymentService):
             routing_key=self._rabbit_settings.QUEUE,
             event_key=str(payment.id),
             payload=PaymentCreatedEvent(payment_id=payment.id).model_dump(mode="json"),
+            headers={REQUEST_ID_MESSAGE_HEADER: request_id} if (request_id := get_request_id()) else {},
             created_at=payment.created_at,
         )
 

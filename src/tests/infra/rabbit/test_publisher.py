@@ -19,6 +19,7 @@ def record() -> Outbox:
         routing_key="payments.new",
         event_key=payment_id,
         payload={"payment_id": payment_id},
+        headers={"x-request-id": "req-42"},
         created_at=utc_now(),
     )
 
@@ -34,8 +35,16 @@ async def test_publish_persistent_message_with_outbox_id(record: Outbox, mocker:
     assert call.kwargs["exchange"].name == "payments"
     assert call.kwargs["routing_key"] == "payments.new"
     assert call.kwargs["message_id"] == str(record.id)
+    assert call.kwargs["headers"] == {"x-request-id": "req-42"}
     assert call.kwargs["persist"] is True
     assert call.kwargs["mandatory"] is True
+
+
+async def test_ping_checks_broker(mocker: MockerFixture) -> None:
+    broker: AsyncMock = mocker.AsyncMock(spec=RabbitBroker)
+    broker.ping.return_value = False
+
+    assert await RabbitEventPublisher(broker=broker).ping() is False
 
 
 async def test_broker_error_wrapped(record: Outbox, mocker: MockerFixture) -> None:

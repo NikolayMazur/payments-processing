@@ -22,7 +22,13 @@ class Payment(BaseModel):
     created_at: datetime
     updated_at: datetime
     processed_at: datetime | None = None
+    webhook_attempts: int = 0
+    webhook_delivered_at: datetime | None = None
 
     @property
     def is_pending(self) -> bool:
         return self.status is PaymentStatusEnum.PENDING
+
+    @property
+    def is_webhook_delivered(self) -> bool:
+        return self.webhook_delivered_at is not None

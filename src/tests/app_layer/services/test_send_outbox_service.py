@@ -1,14 +1,20 @@
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from prometheus_client import REGISTRY
 from pytest_mock import MockerFixture
 
+from app.app_layer.interfaces.publishers.dead_letters import AbstractDeadLetterQueue
 from app.app_layer.interfaces.publishers.events import AbstractEventPublisher, EventPublishError
 from app.app_layer.interfaces.services.outbox.exceptions import OutboxPublishError
+from app.app_layer.services.outbox.clean_service import CleanOutboxService
+from app.app_layer.services.outbox.collect_metrics_service import CollectQueueMetricsService
 from app.app_layer.services.outbox.send_service import SendOutboxService
 from app.config import OutboxSettings
 from app.containers import Container
 from app.domain.outbox.enums import OutboxStatusEnum
+from app.utils import utc_now
 from tests.environment.unit_of_work import TestUow
 from tests.factories import OutboxFactory
 
@@ -81,3 +87,63 @@ class TestSendOutboxService:
         assert [record.id for record in taken] == [locked.id]
         assert sent == 1
         assert self.publisher.publish.await_args.args[0].id == free.id
+
+
+class TestCleanOutboxService:
+    @pytest.fixture(autouse=True)
+    def _setup(self, uow: TestUow) -> None:
+        self.uow = uow
+        self.service = CleanOutboxService(uow=uow, settings=OutboxSettings(RETENTION_DAYS=7, CLEAN_BATCH_SIZE=2))
+
+    async def test_only_old_published_records_deleted(self, outbox_factory: OutboxFactory) -> None:
+        now = utc_now()
+        old = [
+            await outbox_factory.outbox(status=OutboxStatusEnum.SUCCESS, processed_at=now - timedelta(days=8))
+            for _ in range(5)
+        ]
+        fresh = await outbox_factory.outbox(status=OutboxStatusEnum.SUCCESS, processed_at=now - timedelta(days=6))
+        # Неопубликованная запись остаётся при любом возрасте: её ещё предстоит отправить.
+        pending = await outbox_factory.outbox(created_at=now - timedelta(days=30))
+
+        deleted = await self.service.process()
+
+        assert deleted == len(old)
+        async with self.uow:
+            left = {record.id for record in await self.uow.get_all_outbox()}
+        assert left == {fresh.id, pending.id}
+
+    async def test_retention_can_be_overridden(self, outbox_factory: OutboxFactory) -> None:
+        await outbox_factory.outbox(status=OutboxStatusEnum.SUCCESS, processed_at=utc_now() - timedelta(hours=1))
+
+        assert await self.service.process() == 0
+        assert await self.service.process(retention_days=0) == 1
+
+
+class TestCollectQueueMetricsService:
+    async def test_gauges_show_outbox_lag_and_dlq_size(
+        self,
+        uow: TestUow,
+        outbox_factory: OutboxFactory,
+        mocker: MockerFixture,
+    ) -> None:
+        dead_letter_queue: AsyncMock = mocker.AsyncMock(spec=AbstractDeadLetterQueue)
+        dead_letter_queue.count.return_value = 3
+        service = CollectQueueMetricsService(uow=uow, dead_letter_queue=dead_letter_queue)
+        await outbox_factory.outbox(created_at=utc_now() - timedelta(seconds=90))
+        await outbox_factory.outbox()
+        await outbox_factory.outbox(status=OutboxStatusEnum.SUCCESS, processed_at=utc_now())
+
+        await service.process()
+
+        assert REGISTRY.get_sample_value("outbox_pending_records") == 2
+        assert 90 <= (REGISTRY.get_sample_value("outbox_oldest_pending_age_seconds") or 0) < 100
+        assert REGISTRY.get_sample_value("dead_letter_queue_messages") == 3
+
+    async def test_empty_outbox_has_zero_lag(self, uow: TestUow, mocker: MockerFixture) -> None:
+        dead_letter_queue: AsyncMock = mocker.AsyncMock(spec=AbstractDeadLetterQueue)
+        dead_letter_queue.count.return_value = 0
+
+        await CollectQueueMetricsService(uow=uow, dead_letter_queue=dead_letter_queue).process()
+
+        assert REGISTRY.get_sample_value("outbox_pending_records") == 0
+        assert REGISTRY.get_sample_value("outbox_oldest_pending_age_seconds") == 0

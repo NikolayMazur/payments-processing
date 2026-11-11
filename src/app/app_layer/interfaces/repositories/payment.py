@@ -30,3 +30,8 @@ class AbcPaymentRepository(ABC):
     ) -> Payment | None:
         """Проставляет итог обработки платежу в статусе pending. Если платёж уже обработан, возвращает None."""
         raise NotImplementedError
+
+    @abstractmethod
+    async def register_webhook_attempt(self, payment_id: UUID, delivered_at: datetime | None) -> None:
+        """Учитывает попытку доставки вебхука. delivered_at передаётся, если получатель его принял."""
+        raise NotImplementedError

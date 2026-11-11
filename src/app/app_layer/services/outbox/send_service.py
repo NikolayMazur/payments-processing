@@ -1,6 +1,7 @@
 from logging import getLogger
 from uuid import UUID
 
+from app.app_layer import metrics
 from app.app_layer.interfaces.publishers.events import AbstractEventPublisher, EventPublishError
 from app.app_layer.interfaces.services.outbox.exceptions import OutboxPublishError
 from app.app_layer.interfaces.services.outbox.services import AbstractSendOutboxService
@@ -42,6 +43,7 @@ class SendOutboxService(AbstractSendOutboxService):
                 # иначе после отката они уйдут второй раз.
                 await self._uow.outbox.mark_batch_success(ids=sent_ids, processed_at=utc_now())
 
+        metrics.outbox_published.inc(len(sent_ids))
         if error is not None:
             raise OutboxPublishError from error
         return len(sent_ids)

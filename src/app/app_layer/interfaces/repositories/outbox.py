@@ -3,7 +3,14 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
+from pydantic import BaseModel
+
 from app.domain.outbox.entity import Outbox
+
+
+class OutboxPendingStatsDTO(BaseModel):
+    count: int
+    oldest_created_at: datetime | None
 
 
 class AbcOutboxRepository(ABC):
@@ -18,4 +25,13 @@ class AbcOutboxRepository(ABC):
 
     @abstractmethod
     async def mark_batch_success(self, ids: Sequence[UUID], processed_at: datetime) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_pending_stats(self) -> OutboxPendingStatsDTO:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_processed_before(self, threshold: datetime, limit: int) -> int:
+        """Удаляет пачку опубликованных записей старше threshold. Возвращает число удалённых."""
         raise NotImplementedError

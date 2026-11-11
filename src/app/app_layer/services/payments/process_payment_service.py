@@ -1,7 +1,8 @@
 from logging import getLogger
 
+from app.app_layer import metrics
 from app.app_layer.interfaces.clients.payment_gateway import AbstractPaymentGateway
-from app.app_layer.interfaces.clients.webhook import AbstractWebhookClient, PaymentWebhookDTO
+from app.app_layer.interfaces.clients.webhook import AbstractWebhookClient, PaymentWebhookDTO, WebhookDeliveryError
 from app.app_layer.interfaces.services.payments.dto import ProcessPaymentInputDTO
 from app.app_layer.interfaces.services.payments.exceptions import PaymentNotFoundError
 from app.app_layer.interfaces.services.payments.services import AbstractProcessPaymentService
@@ -17,7 +18,7 @@ class ProcessPaymentService(AbstractProcessPaymentService):
     """Проводит платёж через шлюз, сохраняет итог и уведомляет клиента вебхуком.
 
     Сервис идемпотентен: при повторной доставке события платёж второй раз не проводится,
-    повторяется только отправка вебхука.
+    а уже принятый получателем вебхук не отправляется заново.
     """
 
     def __init__(
@@ -39,10 +40,12 @@ class ProcessPaymentService(AbstractProcessPaymentService):
         if payment.is_pending:
             payment = await self._charge(payment)
         else:
-            logger.info("Payment %s is already processed, only webhook will be sent", payment.id)
+            logger.info("Payment %s is already processed, charge is skipped", payment.id)
 
-        await self._webhook_client.send(url=payment.webhook_url, data=self._build_webhook(payment))
-        logger.info("Webhook for payment %s delivered", payment.id)
+        if payment.is_webhook_delivered:
+            logger.info("Webhook for payment %s is already delivered, nothing to send", payment.id)
+            return
+        await self._send_webhook(payment)
 
     async def _charge(self, payment: Payment) -> Payment:
         # Шлюз отвечает секундами, поэтому зовём его вне транзакции и соединение с БД не держим.
@@ -55,13 +58,35 @@ class ProcessPaymentService(AbstractProcessPaymentService):
                 failure_reason=result.failure_reason,
                 processed_at=utc_now(),
             )
+            is_saved_by_us = updated is not None
             if updated is None:
                 # Итог уже записал параллельный обработчик того же события, берём его результат.
                 updated = await self._uow.payment.get_by_id(payment.id)
         if updated is None:
             raise PaymentNotFoundError
+        if is_saved_by_us and updated.processed_at is not None:
+            metrics.payments_processed.labels(status=updated.status.value).inc()
+            metrics.payment_processing_duration.observe((updated.processed_at - updated.created_at).total_seconds())
         logger.info("Payment %s processed with status %s", updated.id, updated.status.value)
         return updated
+
+    async def _send_webhook(self, payment: Payment) -> None:
+        try:
+            await self._webhook_client.send(url=payment.webhook_url, data=self._build_webhook(payment))
+        except WebhookDeliveryError:
+            metrics.webhook_deliveries.labels(result="failed").inc()
+            await self._register_webhook_attempt(payment, is_delivered=False)
+            raise
+        metrics.webhook_deliveries.labels(result="delivered").inc()
+        await self._register_webhook_attempt(payment, is_delivered=True)
+        logger.info("Webhook for payment %s delivered", payment.id)
+
+    async def _register_webhook_attempt(self, payment: Payment, is_delivered: bool) -> None:
+        async with self._uow:
+            await self._uow.payment.register_webhook_attempt(
+                payment_id=payment.id,
+                delivered_at=utc_now() if is_delivered else None,
+            )
 
     @staticmethod
     def _build_webhook(payment: Payment) -> PaymentWebhookDTO:

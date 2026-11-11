@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -16,6 +17,7 @@ from app.domain.outbox.enums import OutboxStatusEnum
 from app.domain.payments.enums import PaymentStatusEnum
 from app.errors import ErrorCodeEnum
 from app.infra.repositories.sqla.payment import PaymentRepository
+from app.logs import RequestIdFilter
 from tests.constants import TEST_API_KEY, TEST_WEBHOOK_URL
 from tests.environment.unit_of_work import TestUow
 from tests.factories import PaymentFactory
@@ -132,12 +134,61 @@ class TestCreatePayment:
             {"webhook_url": "not-a-url"},
             {"metadata": "not-a-dict"},
             {"description": "x" * 1025},
+            {"metadata": {"blob": "x" * 17_000}},
         ],
     )
     async def test_invalid_body_unprocessable(self, client: AsyncClient, invalid: dict[str, Any]) -> None:
         response = await client.post(PAYMENTS_URL, json=build_body(**invalid), headers={"Idempotency-Key": "key-1"})
 
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
+class TestRequestId:
+    async def test_client_request_id_is_echoed_and_saved_to_event(self, client: AsyncClient, uow: TestUow) -> None:
+        headers = {"Idempotency-Key": "key-1", "X-Request-ID": "req-42"}
+
+        response = await client.post(PAYMENTS_URL, json=build_body(), headers=headers)
+
+        assert response.headers["X-Request-ID"] == "req-42"
+        async with uow:
+            outbox = await uow.get_all_outbox()
+        assert outbox[0].headers == {"x-request-id": "req-42"}
+
+    async def test_request_id_is_generated_when_absent(self, client: AsyncClient, uow: TestUow) -> None:
+        response = await client.post(PAYMENTS_URL, json=build_body(), headers={"Idempotency-Key": "key-1"})
+
+        request_id = response.headers["X-Request-ID"]
+        assert UUID(request_id)
+        async with uow:
+            outbox = await uow.get_all_outbox()
+        assert outbox[0].headers == {"x-request-id": request_id}
+
+    async def test_request_id_added_to_logs(self, client: AsyncClient, caplog: pytest.LogCaptureFixture) -> None:
+        headers = {"Idempotency-Key": "key-1", "X-Request-ID": "req-42"}
+        await client.post(PAYMENTS_URL, json=build_body(), headers=headers)
+        caplog.clear()
+        caplog.handler.addFilter(RequestIdFilter())
+
+        with caplog.at_level(logging.INFO):
+            await client.post(PAYMENTS_URL, json=build_body(), headers=headers)
+
+        records = [record for record in caplog.records if "returned by idempotency key" in record.getMessage()]
+        assert [getattr(record, "request_id", None) for record in records] == ["req-42"]
+
+
+class TestMetrics:
+    async def test_metrics_exposed_without_api_key(self, client: AsyncClient) -> None:
+        await client.post(PAYMENTS_URL, json=build_body(), headers={"Idempotency-Key": "key-1"})
+        await client.get(f"{PAYMENTS_URL}/{uuid4()}")
+        client.headers.pop("X-API-Key")
+
+        response = await client.get("/metrics")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert 'payments_created_total{currency="RUB"}' in response.text
+        # В метке шаблон маршрута, а не конкретный идентификатор платежа.
+        assert 'http_requests_total{method="GET",path="/api/v1/payments/{payment_id}",status="404"}' in response.text
+        assert 'path="/metrics"' not in response.text
 
 
 class TestGetPayment:
@@ -159,6 +210,8 @@ class TestGetPayment:
             "failure_reason": None,
             "created_at": payment.created_at.isoformat().replace("+00:00", "Z"),
             "processed_at": None,
+            "webhook_attempts": 0,
+            "webhook_delivered_at": None,
         }
 
     async def test_get_unknown_payment_not_found(self, client: AsyncClient) -> None:

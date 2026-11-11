@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from app.api import rest
 from app.api.rest.exception_handlers import init_exception_handlers
+from app.api.rest.middlewares import init_middlewares
 from app.api.rest.routers import init_rest_api
 from app.config import config
 from app.containers import Container, shutdown_container
@@ -30,5 +31,6 @@ app = FastAPI(
     redoc_url=None,
     openapi_url="/openapi.json" if config.API.DOCS_ENABLED else None,
 )
+init_middlewares(app)
 init_exception_handlers(app)
 init_rest_api(app)
