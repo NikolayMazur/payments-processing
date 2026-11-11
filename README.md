@@ -129,6 +129,7 @@ docker compose exec rabbitmq rabbitmqctl list_queues name messages
 | 404 | Платёж не найден |
 | 409 | `Idempotency-Key` уже использован с другими параметрами платежа |
 | 422 | Нет `Idempotency-Key` или тело не прошло валидацию |
+| 503 | Нет связи с базой данных. Запрос можно повторить с тем же `Idempotency-Key`, в заголовке `Retry-After` пауза в секундах |
 
 Ошибки, кроме 422, приходят в виде `{"detail": {"message_code": "PAYMENT_NOT_FOUND", "message": "Платёж не найден"}}`.
 
@@ -210,6 +211,7 @@ src/
 | `RABBIT__PREFETCH_COUNT` | `10` | Сколько сообщений консьюмер обрабатывает одновременно |
 | `OUTBOX__BATCH_SIZE` | `100` | Размер пачки relay |
 | `OUTBOX__POLL_INTERVAL_SEC` | `0.5` | Пауза relay, когда отправлять нечего |
+| `OUTBOX__MAX_ERROR_DELAY_SEC` | `10` | Потолок паузы relay при сбоях. После каждой ошибки подряд пауза удваивается |
 | `GATEWAY__MIN_DELAY_SEC`, `GATEWAY__MAX_DELAY_SEC` | `2`, `5` | Время ответа шлюза |
 | `GATEWAY__SUCCESS_RATE` | `0.9` | Доля успешных платежей |
 | `WEBHOOK__TIMEOUT_SEC` | `5` | Таймаут запроса вебхука |

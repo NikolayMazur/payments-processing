@@ -5,14 +5,18 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import status
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from pytest_mock import MockerFixture
+from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
 
+from app.api.rest.main import app
 from app.config import config
+from app.containers import Container
 from app.domain.outbox.enums import OutboxStatusEnum
 from app.domain.payments.enums import PaymentStatusEnum
 from app.errors import ErrorCodeEnum
-from tests.constants import TEST_WEBHOOK_URL
+from app.infra.repositories.sqla.payment import PaymentRepository
+from tests.constants import TEST_API_KEY, TEST_WEBHOOK_URL
 from tests.environment.unit_of_work import TestUow
 from tests.factories import PaymentFactory
 
@@ -186,3 +190,59 @@ class TestAuth:
         response = await client.get(f"{PAYMENTS_URL}/{uuid4()}", headers={"X-API-Key": ""})
 
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+class TestDatabaseUnavailable:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OperationalError("INSERT", {}, Exception("the database system is shutting down")),
+            InterfaceError("INSERT", {}, Exception("connection is closed")),
+            ConnectionRefusedError("connect call failed"),
+            TimeoutError(),
+        ],
+    )
+    async def test_lost_connection_service_unavailable(
+        self,
+        client: AsyncClient,
+        mocker: MockerFixture,
+        error: Exception,
+    ) -> None:
+        mocker.patch.object(PaymentRepository, "create_if_absent", side_effect=error)
+        mocker.patch.object(PaymentRepository, "get_by_id", side_effect=error)
+
+        create_response = await client.post(PAYMENTS_URL, json=build_body(), headers={"Idempotency-Key": "key-1"})
+        get_response = await client.get(f"{PAYMENTS_URL}/{uuid4()}")
+
+        for response in (create_response, get_response):
+            assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+            assert response.json()["detail"]["message_code"] == ErrorCodeEnum.SERVICE_UNAVAILABLE_ERROR_CODE.value
+            assert response.headers["Retry-After"] == "5"
+
+    async def test_request_can_be_repeated_after_database_is_back(
+        self,
+        client: AsyncClient,
+        uow: TestUow,
+        mocker: MockerFixture,
+    ) -> None:
+        headers = {"Idempotency-Key": "key-1"}
+        failure = mocker.patch.object(PaymentRepository, "create_if_absent", side_effect=ConnectionRefusedError)
+        assert (await client.post(PAYMENTS_URL, json=build_body(), headers=headers)).status_code == 503
+        mocker.stop(failure)
+
+        response = await client.post(PAYMENTS_URL, json=build_body(), headers=headers)
+
+        assert response.status_code == status.HTTP_202_ACCEPTED
+        async with uow:
+            assert await uow.count_payments() == 1
+
+    async def test_query_error_is_not_masked_as_unavailable(self, container: Container, mocker: MockerFixture) -> None:
+        error = ProgrammingError("INSERT", {}, Exception("column does not exist"))
+        mocker.patch.object(PaymentRepository, "create_if_absent", side_effect=error)
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        headers = {"X-API-Key": TEST_API_KEY, "Idempotency-Key": "key-1"}
+
+        async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as client:
+            response = await client.post(PAYMENTS_URL, json=build_body())
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR

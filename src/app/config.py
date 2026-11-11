@@ -41,6 +41,7 @@ class RabbitSettings(BaseModel):
 class OutboxSettings(BaseModel):
     BATCH_SIZE: int = Field(default=100, gt=0)
     POLL_INTERVAL_SEC: float = Field(default=0.5, gt=0)
+    MAX_ERROR_DELAY_SEC: float = Field(default=10.0, gt=0)
 
 
 class GatewaySettings(BaseModel):

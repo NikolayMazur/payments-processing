@@ -32,7 +32,8 @@ class SendOutboxService(AbstractSendOutboxService):
                 try:
                     await self._publisher.publish(record)
                 except EventPublishError as exc:
-                    logger.exception("Could not publish outbox record %s", record.id)
+                    # Трейсбек не пишем: причина уходит наверх в OutboxPublishError, там её залогируют один раз.
+                    logger.warning("Could not publish outbox record %s: %r", record.id, exc.__cause__ or exc)
                     error = exc
                     break
                 sent_ids.append(record.id)
