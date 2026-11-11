@@ -1,0 +1,188 @@
+import asyncio
+from decimal import Decimal
+from typing import Any
+from uuid import UUID, uuid4
+
+import pytest
+from fastapi import status
+from httpx import AsyncClient
+from pytest_mock import MockerFixture
+
+from app.config import config
+from app.domain.outbox.enums import OutboxStatusEnum
+from app.domain.payments.enums import PaymentStatusEnum
+from app.errors import ErrorCodeEnum
+from tests.constants import TEST_WEBHOOK_URL
+from tests.environment.unit_of_work import TestUow
+from tests.factories import PaymentFactory
+
+PAYMENTS_URL = "/api/v1/payments"
+
+
+def build_body(**kwargs: Any) -> dict[str, Any]:
+    body = {
+        "amount": "1500.00",
+        "currency": "RUB",
+        "description": "Заказ 42",
+        "metadata": {"order_id": 42},
+        "webhook_url": TEST_WEBHOOK_URL,
+    }
+    return body | kwargs
+
+
+class TestCreatePayment:
+    async def test_create_payment_ok(self, client: AsyncClient, uow: TestUow) -> None:
+        response = await client.post(PAYMENTS_URL, json=build_body(), headers={"Idempotency-Key": "key-1"})
+
+        assert response.status_code == status.HTTP_202_ACCEPTED
+        data = response.json()
+        assert set(data) == {"payment_id", "status", "created_at"}
+        assert data["status"] == PaymentStatusEnum.PENDING.value
+
+        async with uow:
+            payment = await uow.payment.get_by_id(UUID(data["payment_id"]))
+            outbox = await uow.get_all_outbox()
+        assert payment is not None
+        assert payment.amount == Decimal("1500.00")
+        assert payment.metadata == {"order_id": 42}
+        assert payment.idempotency_key == "key-1"
+        assert payment.processed_at is None
+
+        assert len(outbox) == 1
+        assert outbox[0].status is OutboxStatusEnum.PENDING
+        assert outbox[0].exchange == config.RABBIT.EXCHANGE
+        assert outbox[0].routing_key == config.RABBIT.QUEUE
+        assert outbox[0].payload == {"payment_id": data["payment_id"]}
+
+    async def test_create_payment_only_required_fields_ok(self, client: AsyncClient) -> None:
+        body = {"amount": 10, "currency": "USD", "webhook_url": TEST_WEBHOOK_URL}
+
+        response = await client.post(PAYMENTS_URL, json=body, headers={"Idempotency-Key": "key-1"})
+
+        assert response.status_code == status.HTTP_202_ACCEPTED
+
+    async def test_repeat_with_same_key_returns_same_payment(self, client: AsyncClient, uow: TestUow) -> None:
+        headers = {"Idempotency-Key": "key-1"}
+        first = await client.post(PAYMENTS_URL, json=build_body(), headers=headers)
+
+        # Сумма записана иначе, но это тот же платёж: 1500.00 == 1500.0
+        second = await client.post(PAYMENTS_URL, json=build_body(amount="1500.0"), headers=headers)
+
+        assert second.status_code == status.HTTP_202_ACCEPTED
+        assert second.json() == first.json()
+        async with uow:
+            assert await uow.count_payments() == 1
+            assert len(await uow.get_all_outbox()) == 1
+
+    async def test_same_key_with_other_body_conflict(self, client: AsyncClient, uow: TestUow) -> None:
+        headers = {"Idempotency-Key": "key-1"}
+        await client.post(PAYMENTS_URL, json=build_body(), headers=headers)
+
+        response = await client.post(PAYMENTS_URL, json=build_body(amount="999.99"), headers=headers)
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert response.json()["detail"]["message_code"] == ErrorCodeEnum.IDEMPOTENCY_KEY_CONFLICT_ERROR_CODE.value
+        async with uow:
+            assert await uow.count_payments() == 1
+            assert len(await uow.get_all_outbox()) == 1
+
+    async def test_concurrent_requests_with_same_key_create_one_payment(
+        self,
+        client: AsyncClient,
+        uow: TestUow,
+    ) -> None:
+        headers = {"Idempotency-Key": "key-1"}
+
+        responses = await asyncio.gather(
+            *(client.post(PAYMENTS_URL, json=build_body(), headers=headers) for _ in range(5)),
+        )
+
+        assert {response.status_code for response in responses} == {status.HTTP_202_ACCEPTED}
+        assert len({response.json()["payment_id"] for response in responses}) == 1
+        async with uow:
+            assert await uow.count_payments() == 1
+            assert len(await uow.get_all_outbox()) == 1
+
+    async def test_different_keys_create_different_payments(self, client: AsyncClient, uow: TestUow) -> None:
+        first = await client.post(PAYMENTS_URL, json=build_body(), headers={"Idempotency-Key": "key-1"})
+        second = await client.post(PAYMENTS_URL, json=build_body(), headers={"Idempotency-Key": "key-2"})
+
+        assert first.json()["payment_id"] != second.json()["payment_id"]
+        async with uow:
+            assert await uow.count_payments() == 2
+
+    async def test_without_idempotency_key_unprocessable(self, client: AsyncClient, uow: TestUow) -> None:
+        response = await client.post(PAYMENTS_URL, json=build_body())
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+        async with uow:
+            assert await uow.count_payments() == 0
+
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            {"amount": "0"},
+            {"amount": "-5"},
+            {"amount": "10.001"},
+            {"currency": "GBP"},
+            {"webhook_url": "not-a-url"},
+            {"metadata": "not-a-dict"},
+            {"description": "x" * 1025},
+        ],
+    )
+    async def test_invalid_body_unprocessable(self, client: AsyncClient, invalid: dict[str, Any]) -> None:
+        response = await client.post(PAYMENTS_URL, json=build_body(**invalid), headers={"Idempotency-Key": "key-1"})
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
+class TestGetPayment:
+    async def test_get_payment_ok(self, client: AsyncClient, payment_factory: PaymentFactory) -> None:
+        payment = await payment_factory.payment()
+
+        response = await client.get(f"{PAYMENTS_URL}/{payment.id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json() == {
+            "payment_id": str(payment.id),
+            "amount": "100.50",
+            "currency": "RUB",
+            "description": payment.description,
+            "metadata": payment.metadata,
+            "status": "pending",
+            "idempotency_key": payment.idempotency_key,
+            "webhook_url": payment.webhook_url,
+            "failure_reason": None,
+            "created_at": payment.created_at.isoformat().replace("+00:00", "Z"),
+            "processed_at": None,
+        }
+
+    async def test_get_unknown_payment_not_found(self, client: AsyncClient) -> None:
+        response = await client.get(f"{PAYMENTS_URL}/{uuid4()}")
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert response.json()["detail"]["message_code"] == ErrorCodeEnum.PAYMENT_NOT_FOUND_ERROR_CODE.value
+
+
+class TestAuth:
+    @pytest.mark.parametrize("headers", [{}, {"X-API-Key": "wrong-key"}, {"X-API-Key": ""}])
+    async def test_invalid_api_key_unauthorized(self, client: AsyncClient, headers: dict[str, str]) -> None:
+        client.headers.pop("X-API-Key")
+
+        create_response = await client.post(
+            PAYMENTS_URL,
+            json=build_body(),
+            headers={"Idempotency-Key": "key-1"} | headers,
+        )
+        get_response = await client.get(f"{PAYMENTS_URL}/{uuid4()}", headers=headers)
+
+        assert create_response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert get_response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert create_response.json()["detail"]["message_code"] == ErrorCodeEnum.UNAUTHORIZED_ERROR_CODE.value
+
+    async def test_api_key_not_configured_unauthorized(self, client: AsyncClient, mocker: MockerFixture) -> None:
+        mocker.patch.object(config.AUTH, "API_KEY", "")
+
+        response = await client.get(f"{PAYMENTS_URL}/{uuid4()}", headers={"X-API-Key": ""})
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
