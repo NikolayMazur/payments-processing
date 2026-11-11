@@ -7,6 +7,8 @@ class ErrorCodeEnum(StrEnum):
     PAYMENT_NOT_FOUND_ERROR_CODE = "PAYMENT_NOT_FOUND"
     IDEMPOTENCY_KEY_CONFLICT_ERROR_CODE = "IDEMPOTENCY_KEY_CONFLICT"
     SERVICE_UNAVAILABLE_ERROR_CODE = "SERVICE_UNAVAILABLE"
+    PAYLOAD_TOO_LARGE_ERROR_CODE = "PAYLOAD_TOO_LARGE"
+    DUPLICATE_IDEMPOTENCY_KEY_ERROR_CODE = "DUPLICATE_IDEMPOTENCY_KEY"
 
 
 UNKNOWN_ERROR = {
@@ -28,4 +30,12 @@ IDEMPOTENCY_KEY_CONFLICT_ERROR = {
 SERVICE_UNAVAILABLE_ERROR = {
     "message_code": ErrorCodeEnum.SERVICE_UNAVAILABLE_ERROR_CODE.value,
     "message": "Сервис временно недоступен",
+}
+PAYLOAD_TOO_LARGE_ERROR = {
+    "message_code": ErrorCodeEnum.PAYLOAD_TOO_LARGE_ERROR_CODE.value,
+    "message": "Тело запроса слишком большое",
+}
+DUPLICATE_IDEMPOTENCY_KEY_ERROR = {
+    "message_code": ErrorCodeEnum.DUPLICATE_IDEMPOTENCY_KEY_ERROR_CODE.value,
+    "message": "Заголовок Idempotency-Key передан несколько раз",
 }

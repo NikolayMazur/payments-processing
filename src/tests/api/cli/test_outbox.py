@@ -53,6 +53,7 @@ async def test_relay_survives_errors_and_stops_on_event(mocker: MockerFixture) -
             heartbeat=heartbeat,
             poll_interval=0.001,
             max_error_delay=0.002,
+            heartbeat_interval=0,
         ),
         timeout=5,
     )
@@ -82,6 +83,7 @@ async def test_relay_logs_traceback_only_for_first_error_in_a_row(
                 heartbeat=heartbeat,
                 poll_interval=0.001,
                 max_error_delay=0.002,
+                heartbeat_interval=0,
             ),
             timeout=5,
         )
@@ -127,8 +129,34 @@ async def test_relay_does_not_beat_without_broker(mocker: MockerFixture) -> None
             heartbeat=heartbeat,
             poll_interval=0.001,
             max_error_delay=0.002,
+            heartbeat_interval=0,
         ),
         timeout=5,
     )
 
     heartbeat.beat.assert_not_called()
+
+
+async def test_relay_asks_broker_once_per_heartbeat_interval(mocker: MockerFixture) -> None:
+    heartbeat: MagicMock = mocker.MagicMock(spec=Heartbeat)
+    publisher: AsyncMock = mocker.AsyncMock(spec=AbstractEventPublisher)
+    publisher.ping.return_value = True
+    stop_event = asyncio.Event()
+    service = build_service(mocker, stop_event, [0] * 20)
+
+    await asyncio.wait_for(
+        send_outbox_until_stopped(
+            stop_event,
+            service=service,
+            publisher=publisher,
+            heartbeat=heartbeat,
+            poll_interval=0.001,
+            max_error_delay=0.002,
+            heartbeat_interval=60,
+        ),
+        timeout=5,
+    )
+
+    # Двадцать кругов, но запрос к брокеру один: интервал ещё не прошёл.
+    assert service.process.await_count == 20
+    publisher.ping.assert_awaited_once()

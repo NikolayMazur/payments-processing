@@ -2,6 +2,7 @@ import hashlib
 import json
 from decimal import Decimal
 from logging import getLogger
+from typing import Any
 
 from app.app_layer import metrics
 from app.app_layer.interfaces.services.payments.dto import CreatePaymentInputDTO, CreatePaymentOutputDTO
@@ -18,6 +19,21 @@ from app.utils import utc_now
 logger = getLogger(__name__)
 
 AMOUNT_QUANT = Decimal("0.01")
+
+
+def canonicalize_json(value: Any) -> Any:
+    """Приводит значение к виду, в котором равные по смыслу JSON дают одинаковую строку.
+
+    1 и 1.0 в JSON одно и то же число, но Python хранит их по-разному. Без приведения повтор запроса,
+    в котором сериализатор клиента записал число иначе, считался бы другим платежом.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: canonicalize_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [canonicalize_json(item) for item in value]
+    return value
 
 
 class CreatePaymentService(AbstractCreatePaymentService):
@@ -61,7 +77,7 @@ class CreatePaymentService(AbstractCreatePaymentService):
                 "amount": str(data.amount.quantize(AMOUNT_QUANT)),
                 "currency": data.currency.value,
                 "description": data.description,
-                "metadata": data.metadata,
+                "metadata": canonicalize_json(data.metadata),
                 "webhook_url": data.webhook_url,
             },
             sort_keys=True,

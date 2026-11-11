@@ -8,6 +8,7 @@ from pytest_mock import MockerFixture
 
 from app.app_layer.interfaces.clients.payment_gateway import AbstractPaymentGateway, GatewayChargeResultDTO
 from app.app_layer.interfaces.clients.webhook import AbstractWebhookClient, PaymentWebhookDTO, WebhookDeliveryError
+from app.app_layer.interfaces.locks.payment import PaymentLockedError
 from app.app_layer.interfaces.services.payments.dto import ProcessPaymentInputDTO
 from app.app_layer.interfaces.services.payments.exceptions import PaymentNotFoundError
 from app.app_layer.interfaces.unit_of_work.exceptions import DatabaseUnavailableError
@@ -22,7 +23,7 @@ from tests.factories import PaymentFactory
 
 class TestProcessPaymentService:
     @pytest.fixture(autouse=True)
-    def _setup_mocks(self, uow: TestUow, mocker: MockerFixture) -> None:
+    def _setup_mocks(self, uow: TestUow, container: Container, mocker: MockerFixture) -> None:
         self.uow = uow
         self.payment_gateway: AsyncMock = mocker.AsyncMock(spec=AbstractPaymentGateway)
         self.payment_gateway.charge.return_value = GatewayChargeResultDTO(is_success=True)
@@ -31,6 +32,7 @@ class TestProcessPaymentService:
             uow=uow,
             payment_gateway=self.payment_gateway,
             webhook_client=self.webhook_client,
+            payment_lock=container.db.payment_lock(),
         )
 
     async def test_successful_charge_saved_and_webhook_sent(self, payment_factory: PaymentFactory) -> None:
@@ -118,11 +120,12 @@ class TestProcessPaymentService:
         assert saved is not None
         assert saved.webhook_attempts == 1
 
-    async def test_concurrent_handler_result_is_not_overwritten(self, payment_factory: PaymentFactory) -> None:
+    async def test_result_saved_earlier_is_not_overwritten(self, payment_factory: PaymentFactory) -> None:
         payment = await payment_factory.payment()
 
         async def charge_while_other_handler_finishes(*_: object) -> GatewayChargeResultDTO:
-            # Пока шлюз отвечал нам, параллельный обработчик того же события уже записал отказ.
+            # Пока шлюз отвечал нам, в БД уже появился итог: его записала прошлая попытка,
+            # у которой запись прошла, а подтверждение о ней потерялось.
             async with self.uow:
                 await self.uow.payment.set_result_if_pending(
                     payment_id=payment.id,
@@ -143,30 +146,24 @@ class TestProcessPaymentService:
         webhook: PaymentWebhookDTO = self.webhook_client.send.await_args.kwargs["data"]
         assert webhook.status is PaymentStatusEnum.FAILED
 
-    async def test_two_consumers_on_same_message_save_single_result(
+    async def test_copy_of_message_is_not_processed_while_payment_is_in_progress(
         self,
         payment_factory: PaymentFactory,
         container: Container,
         mocker: MockerFixture,
     ) -> None:
-        """Одно и то же событие одновременно обрабатывают два консьюмера, каждый в своей транзакции.
+        """Одно и то же событие одновременно получают два консьюмера, каждый со своим соединением.
 
-        Оба успевают прочитать платёж в статусе pending и оба идут в шлюз, поэтому настоящий шлюз
-        обязан быть идемпотентным по идентификатору платежа. В нашей БД остаётся ровно один итог.
+        Второй видит, что платёж занят, и в работу не идёт: в шлюз уходит одно обращение, клиенту один вебхук.
         """
         payment = await payment_factory.payment()
-        both_in_gateway = asyncio.Event()
-        results = [
-            GatewayChargeResultDTO(is_success=True),
-            GatewayChargeResultDTO(is_success=False, failure_reason="x"),
-        ]
+        in_gateway = asyncio.Event()
+        release_gateway = asyncio.Event()
 
         async def charge(*_: object) -> GatewayChargeResultDTO:
-            result = results.pop()
-            if not results:
-                both_in_gateway.set()
-            await both_in_gateway.wait()
-            return result
+            in_gateway.set()
+            await release_gateway.wait()
+            return GatewayChargeResultDTO(is_success=True)
 
         self.payment_gateway.charge.side_effect = charge
         other_webhook_client: AsyncMock = mocker.AsyncMock(spec=AbstractWebhookClient)
@@ -174,19 +171,79 @@ class TestProcessPaymentService:
             uow=TestUow(session_factory=container.db.db().session_factory),
             payment_gateway=self.payment_gateway,
             webhook_client=other_webhook_client,
+            payment_lock=container.db.payment_lock(),
         )
         data = ProcessPaymentInputDTO(payment_id=payment.id)
 
-        await asyncio.gather(self.service.process(data), other_consumer.process(data))
+        first = asyncio.create_task(self.service.process(data))
+        await in_gateway.wait()
+        with pytest.raises(PaymentLockedError):
+            await other_consumer.process(data)
+        release_gateway.set()
+        await first
 
+        self.payment_gateway.charge.assert_awaited_once()
+        self.webhook_client.send.assert_awaited_once()
+        other_webhook_client.send.assert_not_awaited()
         async with self.uow:
             saved = await self.uow.payment.get_by_id(payment.id)
         assert saved is not None
-        assert saved.status is not PaymentStatusEnum.PENDING
-        assert self.payment_gateway.charge.await_count == 2
-        # Проигравший гонку не перезаписал итог и отправил клиенту тот же статус, что и победитель.
-        sent = [client.send.await_args.kwargs["data"].status for client in (self.webhook_client, other_webhook_client)]
-        assert sent == [saved.status, saved.status]
+        assert saved.status is PaymentStatusEnum.SUCCEEDED
+        assert saved.webhook_attempts == 1
+
+    async def test_payment_is_released_after_processing_and_after_failure(
+        self,
+        payment_factory: PaymentFactory,
+    ) -> None:
+        payment = await payment_factory.payment()
+        data = ProcessPaymentInputDTO(payment_id=payment.id)
+        self.webhook_client.send.side_effect = [WebhookDeliveryError, None]
+
+        with pytest.raises(WebhookDeliveryError):
+            await self.service.process(data)
+        # Блокировка снята и после ошибки: повтор того же сообщения проходит.
+        await self.service.process(data)
+
+        assert self.webhook_client.send.await_count == 2
+
+    async def test_different_payments_are_processed_in_parallel(
+        self,
+        payment_factory: PaymentFactory,
+        container: Container,
+    ) -> None:
+        payments = [await payment_factory.payment() for _ in range(5)]
+        all_in_gateway = asyncio.Event()
+        in_gateway = 0
+
+        async def charge(*_: object) -> GatewayChargeResultDTO:
+            nonlocal in_gateway
+            in_gateway += 1
+            if in_gateway == len(payments):
+                all_in_gateway.set()
+            # Если бы блокировка была общей, сюда одновременно дошёл бы только один платёж.
+            await asyncio.wait_for(all_in_gateway.wait(), timeout=5)
+            return GatewayChargeResultDTO(is_success=True)
+
+        self.payment_gateway.charge.side_effect = charge
+        # Как в консьюмере: на каждое сообщение свой экземпляр сервиса со своим UoW.
+        services = [
+            ProcessPaymentService(
+                uow=TestUow(session_factory=container.db.db().session_factory),
+                payment_gateway=self.payment_gateway,
+                webhook_client=self.webhook_client,
+                payment_lock=container.db.payment_lock(),
+            )
+            for _ in payments
+        ]
+
+        await asyncio.gather(
+            *(
+                service.process(ProcessPaymentInputDTO(payment_id=payment.id))
+                for service, payment in zip(services, payments, strict=True)
+            ),
+        )
+
+        assert self.webhook_client.send.await_count == len(payments)
 
     async def test_webhook_is_sent_again_if_delivery_was_not_recorded(
         self,

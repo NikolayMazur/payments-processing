@@ -4,8 +4,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class DatabaseSettings(BaseModel):
     URL: str = "postgresql+asyncpg://postgres:pass@localhost:5442/payments"
+    # Консьюмер на каждое сообщение в работе держит соединение под блокировку платежа и берёт ещё одно
+    # под запросы, поэтому пул с переполнением должен быть не меньше двух RABBIT__PREFETCH_COUNT.
     POOL_SIZE: int = Field(default=10, gt=0)
-    MAX_OVERFLOW: int = Field(default=10, ge=0)
+    MAX_OVERFLOW: int = Field(default=20, ge=0)
     ECHO: bool = False
     # Миграция не должна надолго вставать в очередь за блокировкой и держать за собой запросы сервиса.
     MIGRATION_LOCK_TIMEOUT_MS: int = Field(default=2000, gt=0)
@@ -16,6 +18,9 @@ class APISettings(BaseModel):
     ROOT_PREFIX: str = "/api"
     DOCS_ENABLED: bool = True
     MAX_METADATA_BYTES: int = Field(default=16 * 1024, gt=0)
+    MAX_METADATA_DEPTH: int = Field(default=32, gt=0)
+    # Предел размера тела запроса. С запасом покрывает описание и metadata предельного размера.
+    MAX_BODY_BYTES: int = Field(default=128 * 1024, gt=0)
     REQUEST_ID_HEADER: str = "X-Request-ID"
 
 
@@ -43,6 +48,9 @@ class RabbitSettings(BaseModel):
     RETRY_HEADER: str = "x-retry-attempt"
     # Сколько ждать обработчики при остановке. Должно покрывать ответ шлюза и таймаут вебхука.
     GRACEFUL_TIMEOUT_SEC: float = Field(default=15.0, gt=0)
+    # Сколько ждать подтверждения публикации. Без предела зависший брокер держал бы relay и транзакцию бесконечно.
+    PUBLISH_TIMEOUT_SEC: float = Field(default=10.0, gt=0)
+    PING_TIMEOUT_SEC: float = Field(default=3.0, gt=0)
 
 
 class OutboxSettings(BaseModel):

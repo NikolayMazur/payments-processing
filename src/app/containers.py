@@ -13,6 +13,7 @@ from app.infra.db.database import Database
 from app.infra.gateways.emulated import EmulatedPaymentGateway
 from app.infra.heartbeat import Heartbeat
 from app.infra.http.webhook.client import WebhookClient
+from app.infra.locks.payment import PgAdvisoryPaymentLock
 from app.infra.rabbit.broker import broker
 from app.infra.rabbit.dead_letters import RabbitDeadLetterQueue
 from app.infra.rabbit.publisher import RabbitEventPublisher
@@ -24,6 +25,7 @@ class DBContainer(containers.DeclarativeContainer):
 
     db = providers.Singleton(Database, settings=config.provided.DB)
     uow = providers.Factory(Uow, session_factory=db.provided.session_factory)
+    payment_lock = providers.Factory(PgAdvisoryPaymentLock, session_factory=db.provided.session_factory)
 
 
 class ClientsContainer(containers.DeclarativeContainer):
@@ -41,7 +43,7 @@ class Container(containers.DeclarativeContainer):
     clients = providers.Container(ClientsContainer, config=config)
 
     rabbit_broker = providers.Object(broker)
-    event_publisher = providers.Factory(RabbitEventPublisher, broker=rabbit_broker)
+    event_publisher = providers.Factory(RabbitEventPublisher, broker=rabbit_broker, settings=config.provided.RABBIT)
 
     health_service = providers.Factory(HealthService, uow=db.container.uow)
     create_payment_service = providers.Factory(
@@ -55,6 +57,7 @@ class Container(containers.DeclarativeContainer):
         uow=db.container.uow,
         payment_gateway=clients.container.payment_gateway,
         webhook_client=clients.container.webhook_client,
+        payment_lock=db.container.payment_lock,
     )
     dead_letter_queue = providers.Factory(RabbitDeadLetterQueue, broker=rabbit_broker, settings=config.provided.RABBIT)
     heartbeat = providers.Singleton(Heartbeat, settings=config.provided.HEARTBEAT)

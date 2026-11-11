@@ -32,7 +32,7 @@
             "examples": [
               "1500.00"
             ],
-            "pattern": "^(?!0*(\\.0*)?$)\\d{1,16}(\\.\\d{1,2})?$",
+            "pattern": "^(?!0*(\\.0*)?$)[0-9]{1,16}(\\.[0-9]{1,2})?$",
             "title": "Amount",
             "type": "string"
           },
@@ -333,7 +333,7 @@
             "description": "Successful Response"
           },
           "400": {
-            "description": "Тело запроса не разбирается как JSON"
+            "description": "Тело запроса не разбирается как JSON или Idempotency-Key передан несколько раз"
           },
           "401": {
             "content": {
@@ -354,6 +354,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetailErrorSchema"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {

@@ -43,7 +43,7 @@ class TestRetryAndDlq:
         mocker: MockerFixture,
     ) -> AsyncIterator[None]:
         self.broker = rabbit_broker
-        self.publisher = RabbitEventPublisher(broker=rabbit_broker)
+        self.publisher = RabbitEventPublisher(broker=rabbit_broker, settings=config.RABBIT)
         self.dead_letters = RabbitDeadLetterQueue(broker=rabbit_broker, settings=config.RABBIT)
         self.calls: list[tuple[UUID, float]] = []
         self.outcomes: list[Exception | None] = []

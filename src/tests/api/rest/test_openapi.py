@@ -9,6 +9,9 @@ import os
 import re
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from app.api.rest.main import app
 from app.api.rest.v1.schemas import CreatePaymentRequestSchema
 
@@ -27,7 +30,7 @@ def test_documented_contract_of_payments_api() -> None:
     paths = app.openapi()["paths"]
 
     create = paths["/api/v1/payments"]["post"]
-    assert set(create["responses"]) == {"202", "400", "401", "409", "422", "503"}
+    assert set(create["responses"]) == {"202", "400", "401", "409", "413", "422", "503"}
     assert {param["name"] for param in create["parameters"] if param["required"]} == {"Idempotency-Key"}
     get = paths["/api/v1/payments/{payment_id}"]["get"]
     assert set(get["responses"]) == {"200", "401", "404", "422", "503"}
@@ -42,5 +45,8 @@ def test_documented_amount_format_is_exactly_what_api_accepts() -> None:
     for valid in ("1", "0.01", "1500.00", "10.5", "9999999999999999.99", "007.10"):
         assert pattern.fullmatch(valid), valid
         assert CreatePaymentRequestSchema(amount=valid, currency="RUB", webhook_url="https://example.com/h")
-    for invalid in ("0", "0.00", "-1", "1.234", "abc", "", "1e2", " 5", "NaN", "12345678901234567.00"):
+    for invalid in ("0", "0.00", "-1", "1.234", "abc", "", "1e2", " 5", "NaN", "12345678901234567.00", "+5", ".5"):
         assert not pattern.fullmatch(invalid), invalid
+        # Схема и сервис согласны: что не подходит под шаблон, то сервис строкой не принимает.
+        with pytest.raises(ValidationError):
+            CreatePaymentRequestSchema(amount=invalid, currency="RUB", webhook_url="https://example.com/h")

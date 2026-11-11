@@ -2,8 +2,15 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from uuid import UUID
 
+from pydantic import BaseModel
+
 from app.domain.payments.entity import Payment
 from app.domain.payments.enums import PaymentStatusEnum
+
+
+class PendingPaymentsStatsDTO(BaseModel):
+    count: int
+    oldest_created_at: datetime | None
 
 
 class AbcPaymentRepository(ABC):
@@ -34,4 +41,8 @@ class AbcPaymentRepository(ABC):
     @abstractmethod
     async def register_webhook_attempt(self, payment_id: UUID, delivered_at: datetime | None) -> None:
         """Учитывает попытку доставки вебхука. delivered_at передаётся, если получатель его принял."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_pending_stats(self) -> PendingPaymentsStatsDTO:
         raise NotImplementedError

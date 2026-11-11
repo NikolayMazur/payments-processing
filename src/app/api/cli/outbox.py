@@ -1,9 +1,10 @@
 import asyncio
+import math
 import signal
+import time
 from logging import getLogger
 
 from dependency_injector.wiring import Provide, inject
-from prometheus_client import start_http_server
 
 from app.app_layer import metrics
 from app.app_layer.interfaces.publishers.dead_letters import AbstractDeadLetterQueue
@@ -16,6 +17,7 @@ from app.app_layer.interfaces.services.outbox.services import (
 from app.config import config
 from app.containers import Container, shutdown_container
 from app.infra.heartbeat import Heartbeat
+from app.infra.metrics_server import start_metrics_server
 from app.infra.rabbit.broker import broker
 from app.infra.rabbit.topology import declare_topology
 
@@ -42,8 +44,10 @@ async def send_outbox_until_stopped(
     heartbeat: Heartbeat = Provide[Container.heartbeat],
     poll_interval: float = config.OUTBOX.POLL_INTERVAL_SEC,
     max_error_delay: float = config.OUTBOX.MAX_ERROR_DELAY_SEC,
+    heartbeat_interval: float = config.HEARTBEAT.INTERVAL_SEC,
 ) -> None:
     failures = 0
+    last_ping_at = -math.inf
     while not stop_event.is_set():
         delay = poll_interval
         try:
@@ -66,8 +70,11 @@ async def send_outbox_until_stopped(
         else:
             # Признак жизни обновляется после удачного круга и только при живом брокере. Без второй проверки
             # relay с пустым outbox выглядел бы здоровым, хотя отправить следующее событие ему некуда.
-            if await publisher.ping():
-                heartbeat.beat()
+            # Брокер опрашивается не на каждом круге, а раз в интервал: это отдельный запрос по сети.
+            if time.monotonic() - last_ping_at >= heartbeat_interval:
+                last_ping_at = time.monotonic()
+                if await publisher.ping():
+                    heartbeat.beat()
             if failures:
                 logger.info("Outbox relay recovered after %s failed iterations", failures)
                 failures = 0
@@ -97,8 +104,7 @@ async def run_outbox_relay(container: Container) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
-    if config.METRICS.ENABLED:
-        start_http_server(config.METRICS.PORT)
+    start_metrics_server(config.METRICS)
     await broker.connect()
     await declare_topology(broker)
     logger.info("Outbox relay started")

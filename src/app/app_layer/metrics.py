@@ -13,6 +13,10 @@ payment_processing_duration = Histogram(
 webhook_deliveries = Counter("webhook_deliveries_total", "Попытки доставки вебхука", ["result"])
 
 messages_retried = Counter("payment_messages_retried_total", "Сообщения, отправленные на повтор")
+messages_duplicated = Counter(
+    "payment_messages_duplicated_total",
+    "Копии сообщения, отброшенные, пока платёж обрабатывался по другой копии",
+)
 messages_dead_lettered = Counter("payment_messages_dead_lettered_total", "Сообщения, ушедшие в DLQ", ["reason"])
 
 outbox_published = Counter("outbox_published_total", "Записи outbox, принятые брокером")
@@ -21,5 +25,10 @@ outbox_pending = Gauge("outbox_pending_records", "Записи outbox, ожид�
 outbox_oldest_pending_age = Gauge(
     "outbox_oldest_pending_age_seconds",
     "Возраст самой старой неопубликованной записи outbox",
+)
+payments_pending = Gauge("payments_pending", "Платежи без итога")
+payments_oldest_pending_age = Gauge(
+    "payments_oldest_pending_age_seconds",
+    "Возраст самого старого платежа без итога. Долгий рост означает, что его сообщение потеряно или лежит в DLQ",
 )
 dead_letter_queue_messages = Gauge("dead_letter_queue_messages", "Сообщения в DLQ")

@@ -6,6 +6,8 @@ payments.retry (direct) ── payments.new.retry.N ──▶ очередь с 
 payments.dlx (direct) ── payments.new ──▶ payments.new.dlq
 """
 
+import asyncio
+
 from faststream.rabbit import RabbitBroker, RabbitExchange, RabbitQueue
 
 from app.config import config
@@ -41,6 +43,21 @@ retry_queues = [
     )
     for retry_attempt in range(retry_service.retries_qty)
 ]
+
+
+async def is_broker_responsive(broker: RabbitBroker, timeout_sec: float) -> bool:
+    """Проверяет брокер запросом с ответом, а не состоянием соединения.
+
+    Соединение с зависшим брокером выглядит открытым, пока не сработает heartbeat протокола,
+    поэтому признак «подключён» здесь не годится.
+    """
+    try:
+        async with asyncio.timeout(timeout_sec):
+            queue = await broker.declare_queue(payments_new_queue)
+            await queue.declare()
+    except Exception:
+        return False
+    return True
 
 
 async def declare_topology(broker: RabbitBroker) -> None:

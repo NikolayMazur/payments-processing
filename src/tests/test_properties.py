@@ -53,6 +53,14 @@ def test_metadata_key_order_does_not_matter(amount: Decimal, meta: dict[str, Any
     assert request_hash(build_input(amount, meta)) == request_hash(build_input(amount, shuffled))
 
 
+@given(amount=amounts, numbers=st.lists(st.integers(-(2**53), 2**53), min_size=1, max_size=5))
+def test_integer_written_as_float_is_same_request(amount: Decimal, numbers: list[int]) -> None:
+    as_integers = {"values": numbers, "nested": {"first": numbers[0]}}
+    as_floats = {"values": [float(n) for n in numbers], "nested": {"first": float(numbers[0])}}
+
+    assert request_hash(build_input(amount, as_integers)) == request_hash(build_input(amount, as_floats))
+
+
 @given(amount=amounts, meta=metadata)
 def test_any_changed_field_is_other_request(amount: Decimal, meta: dict[str, Any]) -> None:
     original = request_hash(build_input(amount, meta))

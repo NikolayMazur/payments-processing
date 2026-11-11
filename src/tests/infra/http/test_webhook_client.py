@@ -1,9 +1,10 @@
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -180,6 +181,49 @@ async def test_network_error_is_delivery_error(webhook: PaymentWebhookDTO, error
 
     with pytest.raises(WebhookDeliveryError):
         await build_client(handler).send(url=TEST_WEBHOOK_URL, data=webhook)
+
+
+async def test_receiver_dripping_response_is_cut_by_total_timeout(webhook: PaymentWebhookDTO) -> None:
+    """Получатель отвечает 200 сразу, но ответ целиком не отдаёт: соединение держать нельзя."""
+
+    class EndlessBody(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            while True:
+                await asyncio.sleep(0.05)
+                yield b"x"
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.5)
+        return httpx.Response(200, stream=EndlessBody())
+
+    client = WebhookClient(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        settings=WebhookSettings(TIMEOUT_SEC=0.1),
+    )
+    started_at = time.monotonic()
+
+    with pytest.raises(WebhookDeliveryError):
+        await client.send(url=TEST_WEBHOOK_URL, data=webhook)
+
+    assert time.monotonic() - started_at < 0.4
+
+
+async def test_response_body_is_not_read(webhook: PaymentWebhookDTO) -> None:
+    """Сервису нужен только код ответа: тело может быть любого размера и читать его незачем."""
+    read_chunks = 0
+
+    class HugeBody(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            nonlocal read_chunks
+            for _ in range(10_000):
+                read_chunks += 1
+                yield b"x" * 65536
+
+    client = build_client(lambda _: httpx.Response(200, stream=HugeBody()))
+
+    await client.send(url=TEST_WEBHOOK_URL, data=webhook)
+
+    assert read_chunks == 0
 
 
 async def test_url_secrets_are_not_logged(webhook: PaymentWebhookDTO, caplog: pytest.LogCaptureFixture) -> None:

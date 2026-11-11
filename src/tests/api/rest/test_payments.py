@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -155,6 +156,148 @@ class TestCreatePayment:
         response = await client.post(PAYMENTS_URL, json=build_body(**invalid), headers={"Idempotency-Key": "key-1"})
 
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
+class TestCornerCases:
+    """Запросы, на которых сервис раньше отвечал 500. Тело задаётся сырым JSON: часть значений иначе не передать."""
+
+    @staticmethod
+    def raw_body(**replacements: str) -> bytes:
+        fields = {
+            "amount": '"10.00"',
+            "currency": '"RUB"',
+            "webhook_url": f'"{TEST_WEBHOOK_URL}"',
+            "description": '""',
+            "metadata": "{}",
+        }
+        return ("{" + ",".join(f'"{key}":{value}' for key, value in (fields | replacements).items()) + "}").encode()
+
+    @pytest.mark.parametrize(
+        "replacements",
+        [
+            # Python разбирает эти литералы, а PostgreSQL в jsonb не принимает.
+            {"metadata": '{"a":NaN}'},
+            {"metadata": '{"a":Infinity}'},
+            {"metadata": '{"a":[-Infinity]}'},
+            {"metadata": '{"a":1e400}'},
+            # Одиночный суррогат: в UTF-8 не кодируется.
+            {"description": '"\\ud800"'},
+            {"metadata": '{"k":"\\udfff"}'},
+            {"metadata": '{"\\ud800":1}'},
+            {"metadata": '{"a":' + "[" * 33 + "]" * 33 + "}"},
+            {"metadata": '{"a":' + "[" * 900 + "]" * 900 + "}"},
+            {"metadata": '{"a":' + "[" * 5000 + "]" * 5000 + "}"},
+            {"amount": "NaN"},
+            {"amount": "Infinity"},
+            {"amount": '"+5"'},
+            {"amount": '" 5"'},
+            {"amount": '"1_000"'},
+            {"amount": '"١٢٣"'},
+            {"amount": '"1E-2"'},
+        ],
+        ids=lambda value: str(value)[:40],
+    )
+    async def test_unstorable_input_is_client_error(
+        self,
+        client: AsyncClient,
+        uow: TestUow,
+        replacements: dict[str, str],
+    ) -> None:
+        headers = {"Idempotency-Key": "key-1", "Content-Type": "application/json"}
+
+        response = await client.post(PAYMENTS_URL, content=self.raw_body(**replacements), headers=headers)
+
+        assert response.status_code in {status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_CONTENT}
+        async with uow:
+            assert await uow.count_payments() == 0
+
+    async def test_validation_error_does_not_echo_input(self, client: AsyncClient) -> None:
+        response = await client.post(
+            PAYMENTS_URL,
+            json=build_body(description="secret-value-" + "x" * 1100),
+            headers={"Idempotency-Key": "key-1"},
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+        assert "secret-value" not in response.text
+        assert set(response.json()["detail"][0]) == {"type", "loc", "msg"}
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            ('{"a":1}', '{"a":1.0}'),
+            ('{"a":[1,2],"b":{"c":3}}', '{"b":{"c":3.0},"a":[1.0,2.0]}'),
+        ],
+    )
+    async def test_same_number_in_other_notation_is_same_request(
+        self,
+        client: AsyncClient,
+        first: str,
+        second: str,
+    ) -> None:
+        headers = {"Idempotency-Key": "key-1", "Content-Type": "application/json"}
+        created = await client.post(PAYMENTS_URL, content=self.raw_body(metadata=first), headers=headers)
+
+        repeated = await client.post(PAYMENTS_URL, content=self.raw_body(metadata=second), headers=headers)
+
+        assert repeated.status_code == status.HTTP_202_ACCEPTED
+        assert repeated.json() == created.json()
+
+    async def test_really_different_number_is_conflict(self, client: AsyncClient) -> None:
+        headers = {"Idempotency-Key": "key-1", "Content-Type": "application/json"}
+        await client.post(PAYMENTS_URL, content=self.raw_body(metadata='{"a":1}'), headers=headers)
+
+        response = await client.post(PAYMENTS_URL, content=self.raw_body(metadata='{"a":1.5}'), headers=headers)
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+
+    async def test_too_large_body_rejected(self, client: AsyncClient, uow: TestUow) -> None:
+        body = build_body(description="x" * (config.API.MAX_BODY_BYTES + 1))
+
+        response = await client.post(PAYMENTS_URL, json=body, headers={"Idempotency-Key": "key-1"})
+
+        assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+        assert response.json()["detail"]["message_code"] == ErrorCodeEnum.PAYLOAD_TOO_LARGE_ERROR_CODE.value
+        async with uow:
+            assert await uow.count_payments() == 0
+
+    async def test_too_large_body_without_content_length_rejected(self, client: AsyncClient) -> None:
+        async def chunks() -> AsyncIterator[bytes]:
+            # Тело отдаётся потоком, заголовка Content-Length нет: предел проверяется по факту.
+            yield b'{"amount":"1","currency":"RUB","webhook_url":"https://example.com/h","description":"'
+            for _ in range(config.API.MAX_BODY_BYTES // 1024 + 2):
+                yield b"x" * 1024
+            yield b'"}'
+
+        response = await client.post(
+            PAYMENTS_URL,
+            content=chunks(),
+            headers={"Idempotency-Key": "key-1", "Content-Type": "application/json"},
+        )
+
+        assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+
+    async def test_body_at_reasonable_maximum_accepted(self, client: AsyncClient) -> None:
+        body = build_body(description="я" * 1024, metadata={"k": "x" * (config.API.MAX_METADATA_BYTES - 8)})
+
+        response = await client.post(PAYMENTS_URL, json=body, headers={"Idempotency-Key": "key-1"})
+
+        assert response.status_code == status.HTTP_202_ACCEPTED
+
+    async def test_two_idempotency_keys_in_one_request_rejected(self, client: AsyncClient, uow: TestUow) -> None:
+        headers = [
+            ("Idempotency-Key", "key-1"),
+            ("Idempotency-Key", "key-2"),
+            ("X-API-Key", TEST_API_KEY),
+            ("Content-Type", "application/json"),
+        ]
+
+        response = await client.post(PAYMENTS_URL, content=self.raw_body(), headers=headers)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.json()["detail"]["message_code"] == ErrorCodeEnum.DUPLICATE_IDEMPOTENCY_KEY_ERROR_CODE.value
+        async with uow:
+            assert await uow.count_payments() == 0
 
 
 class TestRequestId:

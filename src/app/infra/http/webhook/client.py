@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -36,13 +37,22 @@ class WebhookClient(AbstractWebhookClient):
         # У платежа одно событие, поэтому его id однозначно определяет уведомление.
         headers = self._build_headers(webhook_id=str(data.payment_id), body=body)
         try:
-            response = await self._client.post(url, content=body, headers=headers, timeout=self._settings.TIMEOUT_SEC)
-        except httpx.HTTPError as exc:
+            # Таймауты httpx действуют на каждую операцию чтения отдельно: получатель, отдающий ответ по байту,
+            # держал бы обработчик сколько угодно. Поэтому поверх стоит предел на весь запрос.
+            async with asyncio.timeout(self._settings.TIMEOUT_SEC):
+                status_code = await self._post(url, body, headers)
+        except (httpx.HTTPError, TimeoutError) as exc:
             logger.warning("Webhook %s is unreachable: %s", mask_url(url), type(exc).__name__)
             raise WebhookDeliveryError(f"Webhook {mask_url(url)} is unreachable") from exc
-        if not response.is_success:
-            logger.warning("Webhook %s responded with status %s", mask_url(url), response.status_code)
-            raise WebhookDeliveryError(f"Webhook {mask_url(url)} responded with status {response.status_code}")
+        if not httpx.codes.is_success(status_code):
+            logger.warning("Webhook %s responded with status %s", mask_url(url), status_code)
+            raise WebhookDeliveryError(f"Webhook {mask_url(url)} responded with status {status_code}")
+
+    async def _post(self, url: str, body: bytes, headers: dict[str, str]) -> int:
+        # Нужен только код ответа. Тело не читаем: получатель может прислать сколько угодно данных.
+        request_timeout = self._settings.TIMEOUT_SEC
+        async with self._client.stream("POST", url, content=body, headers=headers, timeout=request_timeout) as response:
+            return response.status_code
 
     def _build_headers(self, webhook_id: str, body: bytes) -> dict[str, str]:
         timestamp = str(int(utc_now().timestamp()))

@@ -9,6 +9,7 @@ from faststream.rabbit.message import RabbitMessage
 from pytest_mock import MockerFixture
 
 from app.app_layer.interfaces.clients.webhook import WebhookDeliveryError
+from app.app_layer.interfaces.locks.payment import PaymentLockedError
 from app.app_layer.interfaces.services.payments.dto import ProcessPaymentInputDTO
 from app.app_layer.interfaces.services.payments.exceptions import PaymentNotFoundError
 from app.app_layer.interfaces.services.payments.services import AbstractProcessPaymentService
@@ -91,6 +92,16 @@ class TestPaymentsNewConsumer:
 
         self.ack.assert_not_called()
         self.reject.assert_not_called()
+
+    async def test_copy_of_message_in_progress_is_dropped(self) -> None:
+        self.service.process.side_effect = PaymentLockedError
+
+        await self._publish()
+
+        # Не повтор и не DLQ: платёж доведёт до конца та копия, которая его сейчас держит.
+        self.ack.assert_called_once()
+        self.reject.assert_not_called()
+        self.retry_publish.assert_not_called()
 
     async def test_third_failure_rejected_to_dlq(self) -> None:
         self.service.process.side_effect = WebhookDeliveryError

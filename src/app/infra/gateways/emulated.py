@@ -12,16 +12,21 @@ DECLINED_REASON = "Платёж отклонён шлюзом"
 
 
 class EmulatedPaymentGateway(AbstractPaymentGateway):
-    """Эмуляция внешнего платёжного шлюза: отвечает с задержкой и отклоняет часть платежей."""
+    """Эмуляция внешнего платёжного шлюза: отвечает с задержкой и отклоняет часть платежей.
+
+    Ведёт себя как идемпотентный шлюз: исход определяется идентификатором платежа, поэтому
+    повторное обращение по тому же платежу возвращает тот же результат.
+    """
 
     def __init__(self, settings: GatewaySettings) -> None:
         self._settings = settings
 
     async def charge(self, payment: Payment) -> GatewayChargeResultDTO:
         # Случайность здесь изображает поведение шлюза и к безопасности отношения не имеет.
-        delay = random.uniform(self._settings.MIN_DELAY_SEC, self._settings.MAX_DELAY_SEC)  # noqa: S311  # nosec B311
+        rng = random.Random(payment.id.int)  # noqa: S311  # nosec B311
+        delay = rng.uniform(self._settings.MIN_DELAY_SEC, self._settings.MAX_DELAY_SEC)
         logger.info("Charging payment %s, gateway will respond in %.1f sec", payment.id, delay)
         await asyncio.sleep(delay)
-        if random.random() < self._settings.SUCCESS_RATE:  # noqa: S311  # nosec B311
+        if rng.random() < self._settings.SUCCESS_RATE:
             return GatewayChargeResultDTO(is_success=True)
         return GatewayChargeResultDTO(is_success=False, failure_reason=DECLINED_REASON)

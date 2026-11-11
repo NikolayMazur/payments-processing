@@ -14,9 +14,10 @@ from app.app_layer.services.outbox.send_service import SendOutboxService
 from app.config import OutboxSettings
 from app.containers import Container
 from app.domain.outbox.enums import OutboxStatusEnum
+from app.domain.payments.enums import PaymentStatusEnum
 from app.utils import utc_now
 from tests.environment.unit_of_work import TestUow
-from tests.factories import OutboxFactory
+from tests.factories import OutboxFactory, PaymentFactory
 
 
 class TestSendOutboxService:
@@ -138,6 +139,33 @@ class TestCollectQueueMetricsService:
         assert REGISTRY.get_sample_value("outbox_pending_records") == 2
         assert 90 <= (REGISTRY.get_sample_value("outbox_oldest_pending_age_seconds") or 0) < 100
         assert REGISTRY.get_sample_value("dead_letter_queue_messages") == 3
+
+    async def test_gauges_show_payments_without_result(
+        self,
+        uow: TestUow,
+        payment_factory: PaymentFactory,
+        mocker: MockerFixture,
+    ) -> None:
+        dead_letter_queue: AsyncMock = mocker.AsyncMock(spec=AbstractDeadLetterQueue)
+        dead_letter_queue.count.return_value = 0
+        old = utc_now() - timedelta(minutes=10)
+        # Платёж, чьё сообщение потерялось или лежит в DLQ: итога нет уже десять минут.
+        stuck = await payment_factory.payment(created_at=old, updated_at=old)
+        await payment_factory.payment()
+        processed = await payment_factory.payment(created_at=old - timedelta(hours=1), updated_at=old)
+        async with uow:
+            await uow.payment.set_result_if_pending(
+                payment_id=processed.id,
+                status=PaymentStatusEnum.SUCCEEDED,
+                failure_reason=None,
+                processed_at=utc_now(),
+            )
+
+        await CollectQueueMetricsService(uow=uow, dead_letter_queue=dead_letter_queue).process()
+
+        assert stuck.is_pending
+        assert REGISTRY.get_sample_value("payments_pending") == 2
+        assert 600 <= (REGISTRY.get_sample_value("payments_oldest_pending_age_seconds") or 0) < 620
 
     async def test_empty_outbox_has_zero_lag(self, uow: TestUow, mocker: MockerFixture) -> None:
         dead_letter_queue: AsyncMock = mocker.AsyncMock(spec=AbstractDeadLetterQueue)

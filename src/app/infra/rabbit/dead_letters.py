@@ -42,6 +42,7 @@ class RabbitDeadLetterQueue(AbstractDeadLetterQueue):
             # Сначала публикуем, потом подтверждаем: при сбое сообщение останется в DLQ.
             await self._broker.publish(
                 message.body,
+                timeout=self._settings.PUBLISH_TIMEOUT_SEC,
                 exchange=payments_exchange,
                 routing_key=payments_new_queue.routing_key,
                 headers=headers,

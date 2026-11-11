@@ -2,11 +2,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.app_layer.interfaces.repositories.payment import AbcPaymentRepository
+from app.app_layer.interfaces.repositories.payment import AbcPaymentRepository, PendingPaymentsStatsDTO
 from app.domain.payments.entity import Payment
 from app.domain.payments.enums import PaymentStatusEnum
 from app.infra.repositories.sqla.models import PaymentOrm
@@ -69,6 +69,13 @@ class PaymentRepository(AbcPaymentRepository):
         if delivered_at is not None:
             values["webhook_delivered_at"] = delivered_at
         await self._session.execute(update(PaymentOrm).where(PaymentOrm.id == payment_id).values(**values))
+
+    async def get_pending_stats(self) -> PendingPaymentsStatsDTO:
+        stmt = select(func.count(), func.min(PaymentOrm.created_at)).where(
+            PaymentOrm.status == PaymentStatusEnum.PENDING,
+        )
+        count, oldest_created_at = (await self._session.execute(stmt)).one()
+        return PendingPaymentsStatsDTO(count=count, oldest_created_at=oldest_created_at)
 
     @staticmethod
     def _map_model_to_entity(orm: PaymentOrm) -> Payment:

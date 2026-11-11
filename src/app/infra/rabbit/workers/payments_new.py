@@ -9,21 +9,23 @@ from typing import Any
 
 from faststream import AckPolicy, FastStream
 from faststream.rabbit import RabbitMessage
-from prometheus_client import start_http_server
 from pydantic import ValidationError
 
 from app.api.events.rabbit.consumers import payment_created
 from app.api.events.rabbit.consumers.payment_created import process_payment_created_event
 from app.app_layer import metrics
+from app.app_layer.interfaces.locks.payment import PaymentLockedError
 from app.app_layer.interfaces.services.payments.exceptions import PaymentNotFoundError
 from app.config import config
 from app.containers import Container, shutdown_container
 from app.context import REQUEST_ID_MESSAGE_HEADER, request_id_var
 from app.domain.payments.events import PaymentCreatedEvent
 from app.infra.heartbeat import Heartbeat
+from app.infra.metrics_server import start_metrics_server
 from app.infra.rabbit.broker import broker
 from app.infra.rabbit.topology import (
     declare_topology,
+    is_broker_responsive,
     payments_exchange,
     payments_new_queue,
     retry_exchange,
@@ -34,15 +36,13 @@ from app.logs import init_logging
 init_logging(config)
 logger = getLogger(__name__)
 
-PING_TIMEOUT_SEC = 3
-
 app = FastStream(broker, logger=logger)
 
 
 async def beat_while_broker_is_reachable(heartbeat: Heartbeat) -> None:
     """Обновляет признак жизни, пока есть связь с брокером. По нему работает healthcheck контейнера."""
     while True:
-        if await broker.ping(timeout=PING_TIMEOUT_SEC):
+        if await is_broker_responsive(broker, timeout_sec=config.RABBIT.PING_TIMEOUT_SEC):
             heartbeat.beat()
         await asyncio.sleep(config.HEARTBEAT.INTERVAL_SEC)
 
@@ -52,8 +52,7 @@ async def startup() -> None:
     container = Container()
     container.wire(modules=[payment_created])
     app.context.set_global("container", container)
-    if config.METRICS.ENABLED:
-        start_http_server(config.METRICS.PORT)
+    start_metrics_server(config.METRICS)
     await broker.connect()
     await declare_topology(broker)
 
@@ -92,6 +91,13 @@ async def _handle(body: Any, message: RabbitMessage) -> None:
 
     try:
         await process_payment_created_event(event)
+    except PaymentLockedError:
+        # Платёж уже в работе по другой копии этого события. Её сообщение не подтверждено и при сбое
+        # вернётся на повтор само, поэтому эту копию можно спокойно отбросить.
+        logger.info("Payment %s is being processed by another handler, duplicate message dropped", event.payment_id)
+        metrics.messages_duplicated.inc()
+        await message.ack()
+        return
     except PaymentNotFoundError:
         logger.exception("Payment %s not found, message sent to DLQ", event.payment_id)
         metrics.messages_dead_lettered.labels(reason="not_found").inc()
@@ -137,6 +143,7 @@ async def _retry_or_reject(body: Any, message: RabbitMessage, event: PaymentCrea
         correlation_id=message.correlation_id,
         persist=True,
         mandatory=True,
+        timeout=config.RABBIT.PUBLISH_TIMEOUT_SEC,
     )
     metrics.messages_retried.inc()
     await message.ack()
