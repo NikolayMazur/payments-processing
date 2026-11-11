@@ -26,12 +26,20 @@ def run_migrations_offline() -> None:
         compare_type=True,
     )
     with context.begin_transaction():
+        set_timeouts()
         context.run_migrations()
+
+
+def set_timeouts() -> None:
+    """Ограничивает ожидание блокировки и время выполнения на время миграции."""
+    context.execute(f"SET LOCAL lock_timeout = '{app_config.DB.MIGRATION_LOCK_TIMEOUT_MS}ms'")
+    context.execute(f"SET LOCAL statement_timeout = '{app_config.DB.MIGRATION_STATEMENT_TIMEOUT_MS}ms'")
 
 
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
     with context.begin_transaction():
+        set_timeouts()
         context.run_migrations()
 
 

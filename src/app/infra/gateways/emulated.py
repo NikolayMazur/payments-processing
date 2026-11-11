@@ -18,9 +18,10 @@ class EmulatedPaymentGateway(AbstractPaymentGateway):
         self._settings = settings
 
     async def charge(self, payment: Payment) -> GatewayChargeResultDTO:
-        delay = random.uniform(self._settings.MIN_DELAY_SEC, self._settings.MAX_DELAY_SEC)  # noqa: S311
+        # Случайность здесь изображает поведение шлюза и к безопасности отношения не имеет.
+        delay = random.uniform(self._settings.MIN_DELAY_SEC, self._settings.MAX_DELAY_SEC)  # noqa: S311  # nosec B311
         logger.info("Charging payment %s, gateway will respond in %.1f sec", payment.id, delay)
         await asyncio.sleep(delay)
-        if random.random() < self._settings.SUCCESS_RATE:  # noqa: S311
+        if random.random() < self._settings.SUCCESS_RATE:  # noqa: S311  # nosec B311
             return GatewayChargeResultDTO(is_success=True)
         return GatewayChargeResultDTO(is_success=False, failure_reason=DECLINED_REASON)

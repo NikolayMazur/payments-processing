@@ -24,7 +24,10 @@ router = APIRouter(prefix="/payments", tags=["Payments"])
     response_model=CreatePaymentOutputDTO,
     name="create_payment",
     status_code=status.HTTP_202_ACCEPTED,
-    responses={status.HTTP_409_CONFLICT: {"model": DetailErrorSchema}},
+    responses={
+        status.HTTP_400_BAD_REQUEST: {"description": "Тело запроса не разбирается как JSON"},
+        status.HTTP_409_CONFLICT: {"model": DetailErrorSchema},
+    },
 )
 @inject
 async def create_payment(

@@ -14,7 +14,7 @@ logger = getLogger(__name__)
 WEBHOOK_ID_HEADER = "webhook-id"
 WEBHOOK_TIMESTAMP_HEADER = "webhook-timestamp"
 WEBHOOK_SIGNATURE_HEADER = "webhook-signature"
-SECRET_PREFIX = "whsec_"  # noqa: S105
+SECRET_PREFIX = "whsec_"  # noqa: S105  # nosec B105  это префикс формата, а не секрет
 SIGNATURE_VERSION = "v1"
 
 

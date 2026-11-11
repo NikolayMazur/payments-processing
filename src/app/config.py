@@ -7,6 +7,9 @@ class DatabaseSettings(BaseModel):
     POOL_SIZE: int = Field(default=10, gt=0)
     MAX_OVERFLOW: int = Field(default=10, ge=0)
     ECHO: bool = False
+    # Миграция не должна надолго вставать в очередь за блокировкой и держать за собой запросы сервиса.
+    MIGRATION_LOCK_TIMEOUT_MS: int = Field(default=2000, gt=0)
+    MIGRATION_STATEMENT_TIMEOUT_MS: int = Field(default=60000, gt=0)
 
 
 class APISettings(BaseModel):
@@ -22,7 +25,7 @@ class AuthSettings(BaseModel):
 
 
 class UvicornSettings(BaseModel):
-    HOST: str = "0.0.0.0"
+    HOST: str = "0.0.0.0"  # nosec B104  сервис работает в контейнере и слушает все его интерфейсы
     PORT: int = 8000
     WORKERS: int = Field(default=1, gt=0)
 
@@ -70,7 +73,8 @@ class MetricsSettings(BaseModel):
 
 
 class HeartbeatSettings(BaseModel):
-    PATH: str = "/tmp/payments-heartbeat"  # noqa: S108
+    # В файле нет данных, важно только время его изменения.
+    PATH: str = "/tmp/payments-heartbeat"  # noqa: S108  # nosec B108
     INTERVAL_SEC: float = Field(default=5.0, gt=0)
     MAX_AGE_SEC: float = Field(default=30.0, gt=0)
 

@@ -109,6 +109,13 @@ class TestCreatePayment:
             assert await uow.count_payments() == 1
             assert len(await uow.get_all_outbox()) == 1
 
+    async def test_broken_json_bad_request(self, client: AsyncClient) -> None:
+        headers = {"Idempotency-Key": "key-1", "Content-Type": "application/json"}
+
+        response = await client.post(PAYMENTS_URL, content=b"\xff\xfe not json", headers=headers)
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
     async def test_different_keys_create_different_payments(self, client: AsyncClient, uow: TestUow) -> None:
         first = await client.post(PAYMENTS_URL, json=build_body(), headers={"Idempotency-Key": "key-1"})
         second = await client.post(PAYMENTS_URL, json=build_body(), headers={"Idempotency-Key": "key-2"})
@@ -135,6 +142,13 @@ class TestCreatePayment:
             {"metadata": "not-a-dict"},
             {"description": "x" * 1025},
             {"metadata": {"blob": "x" * 17_000}},
+            # Нулевой символ PostgreSQL не хранит, без проверки эти запросы падали с 500.
+            {"description": "a\x00b"},
+            {"metadata": {"key": "a\x00b"}},
+            {"metadata": {"a\x00b": 1}},
+            {"metadata": {"nested": [{"deep": "a\x00b"}]}},
+            {"amount": "NaN"},
+            {"amount": "Infinity"},
         ],
     )
     async def test_invalid_body_unprocessable(self, client: AsyncClient, invalid: dict[str, Any]) -> None:
