@@ -24,5 +24,5 @@ RUN useradd --create-home --uid 1000 appuser
 COPY src /app/code
 WORKDIR /app/code
 USER 1000
-EXPOSE 8000
+EXPOSE 8000 9000
 CMD ["python", "manage.py", "run-server"]

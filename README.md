@@ -22,7 +22,7 @@ flowchart LR
 
 1. `api` сохраняет платёж в статусе `pending` и событие в таблицу `outbox` одной транзакцией, отвечает `202 Accepted`. В RabbitMQ сам не ходит.
 2. `outbox-relay` забирает неотправленные записи, публикует их в обменник `payments` и помечает отправленными.
-3. `consumer` читает очередь `payments.new`, вызывает шлюз (ответ через 2–5 секунд, 90% успеха), пишет итог в БД и шлёт вебхук на `webhook_url`.
+3. `consumer` читает очередь `payments.new`, вызывает шлюз (ответ через 2–5 секунд, 90% успеха), пишет итог в БД и шлёт вебхук на `webhook_url`. Попытки доставки и момент подтверждения сохраняются в платеже.
 4. Если обработка упала, сообщение уходит в очередь задержки и возвращается через 2, затем через 4 секунды. После третьей неудачной попытки оно попадает в `payments.new.dlq`.
 
 ## Запуск
@@ -88,9 +88,13 @@ curl http://localhost:8000/api/v1/payments/51f14258-95af-43fa-a24c-4d70b9ca2c3b 
   "webhook_url": "http://webhook-sink:8080/hooks/payments",
   "failure_reason": null,
   "created_at": "2026-11-11T16:33:02.772944Z",
-  "processed_at": "2026-11-11T16:33:07.744907Z"
+  "processed_at": "2026-11-11T16:33:07.744907Z",
+  "webhook_attempts": 1,
+  "webhook_delivered_at": "2026-11-11T16:33:07.766312Z"
 }
 ```
+
+`webhook_attempts` и `webhook_delivered_at` показывают, сколько раз сервис пытался доставить вебхук и когда получатель его принял.
 
 Посмотреть пришедший вебхук:
 
@@ -135,6 +139,41 @@ docker compose exec rabbitmq rabbitmqctl list_queues name messages
 
 `GET /healthcheck` работает без ключа и проверяет соединение с БД.
 
+## Наблюдаемость
+
+### Идентификатор запроса
+
+API принимает заголовок `X-Request-ID`, а если его нет, генерирует сам и возвращает в ответе. Значение сохраняется в событии outbox, едет заголовком `x-request-id` в сообщении RabbitMQ и попадает в поле `request_id` каждой строки лога API и консьюмера, включая повторы. По нему собирается вся история одного платежа:
+
+```bash
+docker compose logs api consumer | grep '"request_id": "<значение>"'
+```
+
+### Метрики
+
+Формат Prometheus. API отдаёт их на `GET /metrics` своего порта, `consumer` и `outbox-relay` на порту `9000` внутри сети compose.
+
+| Метрика | Что показывает |
+|---|---|
+| `outbox_oldest_pending_age_seconds`, `outbox_pending_records` | Отставание relay. Рост означает, что события не доходят до брокера |
+| `dead_letter_queue_messages` | Сколько сообщений лежит в DLQ |
+| `payment_processing_seconds` | Время от создания платежа до записи итога |
+| `payments_created_total`, `payments_processed_total` | Принятые платежи и итоги по статусам |
+| `webhook_deliveries_total` | Попытки доставки вебхука по результату |
+| `payment_messages_retried_total`, `payment_messages_dead_lettered_total` | Повторы и уходы в DLQ по причинам |
+| `outbox_published_total`, `outbox_publish_errors_total` | Работа relay |
+| `http_requests_total`, `http_request_duration_seconds` | Запросы к API по маршруту и коду ответа |
+
+Посмотреть метрики воркера:
+
+```bash
+docker compose exec consumer python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:9000').read().decode())"
+```
+
+### Состояние воркеров
+
+У `consumer` и `outbox-relay` нет HTTP-интерфейса, поэтому их healthcheck устроен через признак жизни: процесс обновляет файл, пока работает и видит брокер, а проверка `python -m app.infra.heartbeat` смотрит на возраст файла. Консьюмер при остановке дожидается обработчиков до `RABBIT__GRACEFUL_TIMEOUT_SEC`, в compose для этого задан `stop_grace_period: 30s`.
+
 ## Гарантии
 
 ### Идемпотентность создания
@@ -165,10 +204,23 @@ docker compose exec rabbitmq rabbitmqctl list_queues name messages
 
 Ошибкой отправки вебхука считается сетевой сбой, таймаут и любой ответ не 2xx.
 
-### Что стоит знать получателю вебхука
+Сообщения из DLQ возвращаются в обработку командой `python manage.py requeue-dlq`, счётчик попыток при этом обнуляется. Платёж повторно не проводится, а уже принятый получателем вебхук не отправляется заново.
 
-- Вебхук может прийти больше одного раза, дедуплицировать нужно по `payment_id`.
-- Если задан `WEBHOOK__SECRET`, в заголовке `X-Signature` приходит `sha256=<HMAC-SHA256 тела>`.
+### Вебхуки
+
+Уведомления отправляются по соглашению [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md), для проверки подходят готовые библиотеки.
+
+| Заголовок | Значение |
+|---|---|
+| `webhook-id` | Идентификатор уведомления, совпадает с `payment_id`. Между повторами не меняется |
+| `webhook-timestamp` | Время отправки, Unix-время в секундах |
+| `webhook-signature` | `v1,<base64>`, HMAC-SHA256 от строки `{webhook-id}.{webhook-timestamp}.{тело}`. Есть, если задан `WEBHOOK__SECRET` |
+
+Что стоит знать получателю:
+
+- Вебхук может прийти больше одного раза, дедуплицировать нужно по `webhook-id`. Сервис запоминает подтверждённую доставку и после неё уведомление не повторяет, но при сбое между ответом получателя и записью в БД повтор возможен.
+- Подпись считается по сырым байтам тела. Чтобы перехваченный запрос нельзя было переслать позже, сверяйте `webhook-timestamp` с текущим временем.
+- Секрет задаётся в виде `whsec_<base64>`, ключом служат раскодированные байты. Сгенерировать: `echo "whsec_$(openssl rand -base64 32)"`.
 - Если вебхук не доставлен за три попытки, статус платежа всё равно доступен через `GET /api/v1/payments/{id}`.
 
 ## Структура
@@ -197,6 +249,15 @@ src/
 | outbox-relay | `python manage.py run-outbox-relay` |
 | consumer | `faststream run app.infra.rabbit.workers.payments_new:app` |
 
+Служебные команды:
+
+| Команда | Что делает |
+|---|---|
+| `python manage.py requeue-dlq [--limit N]` | Возвращает сообщения из `payments.new.dlq` в обработку |
+| `python manage.py clean-outbox [--retention-days N]` | Удаляет опубликованные записи outbox старше срока хранения |
+
+В Docker они запускаются так: `docker compose run --rm api python manage.py clean-outbox`. Очистку стоит повесить на расписание, например раз в сутки.
+
 ## Переменные окружения
 
 Вложенные настройки задаются через двойное подчёркивание.
@@ -209,13 +270,17 @@ src/
 | `RABBIT__MAX_ATTEMPTS` | `3` | Сколько раз обрабатывать сообщение до DLQ |
 | `RABBIT__RETRY_BASE_DELAY_SEC` | `2` | База экспоненциальной задержки |
 | `RABBIT__PREFETCH_COUNT` | `10` | Сколько сообщений консьюмер обрабатывает одновременно |
+| `RABBIT__GRACEFUL_TIMEOUT_SEC` | `15` | Сколько консьюмер ждёт обработчики при остановке |
 | `OUTBOX__BATCH_SIZE` | `100` | Размер пачки relay |
 | `OUTBOX__POLL_INTERVAL_SEC` | `0.5` | Пауза relay, когда отправлять нечего |
 | `OUTBOX__MAX_ERROR_DELAY_SEC` | `10` | Потолок паузы relay при сбоях. После каждой ошибки подряд пауза удваивается |
 | `GATEWAY__MIN_DELAY_SEC`, `GATEWAY__MAX_DELAY_SEC` | `2`, `5` | Время ответа шлюза |
 | `GATEWAY__SUCCESS_RATE` | `0.9` | Доля успешных платежей |
 | `WEBHOOK__TIMEOUT_SEC` | `5` | Таймаут запроса вебхука |
-| `WEBHOOK__SECRET` | пусто | Секрет для подписи вебхуков |
+| `OUTBOX__RETENTION_DAYS` | `7` | Срок хранения опубликованных записей для `clean-outbox` |
+| `WEBHOOK__SECRET` | пусто | Секрет для подписи вебхуков, `whsec_<base64>` |
+| `API__MAX_METADATA_BYTES` | `16384` | Предел размера `metadata` в запросе |
+| `METRICS__ENABLED`, `METRICS__PORT` | `true`, `9000` | Метрики и порт, на котором их отдают воркеры |
 | `LOG_LEVEL`, `LOG_JSON` | `INFO`, `true` | Логирование |
 
 Число попыток и задержки зашиты в аргументы очередей. Если поменять `RABBIT__MAX_ATTEMPTS` или `RABBIT__RETRY_BASE_DELAY_SEC` на работающем брокере, очереди `payments.new.retry.*` нужно удалить, иначе RabbitMQ откажет в объявлении с другими аргументами.
@@ -233,7 +298,7 @@ make format    # автоформатирование
 make check     # всё вместе
 ```
 
-Тестам нужен только PostgreSQL. Они создают отдельную базу `payments_test`, накатывают её настоящими миграциями и чистят таблицы после каждого теста. Брокер в тестах заменён на `TestRabbitBroker` из FastStream.
+Тестам нужны PostgreSQL и RabbitMQ, оба поднимает `make infra`. База своя, `payments_test`: она накатывается настоящими миграциями, таблицы чистятся после каждого теста. В большинстве тестов брокер заменён на `TestRabbitBroker` из FastStream. Тесты из `tests/integration` ходят в настоящий RabbitMQ, в отдельный vhost `payments_test`, и проверяют то, что заглушка не умеет: возврат из очередей задержки по TTL, уход в DLQ и возврат из неё.
 
 Миграции:
 
@@ -245,6 +310,6 @@ make migrations
 ## Ограничения
 
 - Шлюз эмулируется, результат случайный.
-- Таблица `outbox` не чистится. На боевой нагрузке нужна периодическая очистка записей `SUCCESS` или партиционирование по дате.
-- Сообщения из DLQ разбираются вручную, автоматического возврата в обработку нет.
+- Очистка `outbox` и возврат сообщений из DLQ запускаются командами вручную или по расписанию, внутри сервиса планировщика нет.
+- Метрики API считаются в памяти процесса. При `UVICORN__WORKERS` больше одного каждый процесс отдаёт свои значения.
 - `webhook_url` проверяется только на корректность адреса. Для публичного сервиса понадобится запрет внутренних адресов.

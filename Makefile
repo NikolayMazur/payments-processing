@@ -33,6 +33,12 @@ infra:
 migrations:
 	cd src && uv run alembic upgrade head
 
+clean_outbox:
+	cd src && uv run python manage.py clean-outbox
+
+requeue_dlq:
+	cd src && uv run python manage.py requeue-dlq
+
 create_migration:
 	cd src && uv run alembic revision --autogenerate --message $(name)
 

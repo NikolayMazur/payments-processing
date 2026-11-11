@@ -1,3 +1,14 @@
+# Воркеры при остановке дожидаются обработчиков (RABBIT__GRACEFUL_TIMEOUT_SEC, 15 с),
+# поэтому Docker должен ждать дольше, чем его 10 секунд по умолчанию.
+x-worker: &worker
+  stop_grace_period: 30s
+  healthcheck:
+    test: ["CMD", "python", "-m", "app.infra.heartbeat"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+
 x-app: &app
   build:
     context: .
@@ -62,7 +73,7 @@ services:
       retries: 5
 
   outbox-relay:
-    <<: *app
+    <<: [*app, *worker]
     command: python manage.py run-outbox-relay
     depends_on:
       migrations:
@@ -71,7 +82,7 @@ services:
         condition: service_healthy
 
   consumer:
-    <<: *app
+    <<: [*app, *worker]
     command: faststream run app.infra.rabbit.workers.payments_new:app
     depends_on:
       migrations:
