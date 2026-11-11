@@ -1,0 +1,93 @@
+x-app: &app
+  build:
+    context: .
+    target: runtime
+  image: payments-processing:local
+  env_file:
+    - .env-defaults
+    - path: .env
+      required: false
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: payments
+    ports:
+      - "5442:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d payments"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  migrations:
+    <<: *app
+    command: alembic upgrade head
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: python manage.py run-server
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthcheck')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  outbox-relay:
+    <<: *app
+    command: python manage.py run-outbox-relay
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  consumer:
+    <<: *app
+    command: faststream run app.infra.rabbit.workers.payments_new:app
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  # Приёмник вебхуков для локальной проверки: docker compose --profile demo up
+  webhook-sink:
+    image: mendhak/http-https-echo:37
+    profiles: ["demo"]
+    environment:
+      HTTP_PORT: 8080
+    ports:
+      - "8081:8080"
+
+volumes:
+  db_data:
+  rabbitmq_data:
