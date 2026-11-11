@@ -4,11 +4,15 @@ import hmac
 import json
 import time
 from collections.abc import Callable
+from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
 
 import httpx
 import pytest
+from pytest_mock import MockerFixture
+from standardwebhooks import Webhook
+from standardwebhooks.webhooks import WebhookVerificationError
 
 from app.app_layer.interfaces.clients.webhook import PaymentWebhookDTO, WebhookDeliveryError
 from app.config import WebhookSettings
@@ -104,6 +108,56 @@ async def test_webhook_without_secret_not_signed(webhook: PaymentWebhookDTO) -> 
     assert "webhook-signature" not in requests[0].headers
     assert "webhook-id" in requests[0].headers
     assert "webhook-timestamp" in requests[0].headers
+
+
+class TestStandardWebhooksLibrary:
+    """Проверка официальной библиотекой получателя: тест и код не могут ошибиться одинаково."""
+
+    @pytest.fixture()
+    async def request_(self, webhook: PaymentWebhookDTO) -> httpx.Request:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200)
+
+        await build_client(handler, secret=STANDARD_SECRET).send(url=TEST_WEBHOOK_URL, data=webhook)
+        return requests[0]
+
+    def test_library_accepts_webhook(self, request_: httpx.Request, webhook: PaymentWebhookDTO) -> None:
+        payload = Webhook(STANDARD_SECRET).verify(request_.content, dict(request_.headers))
+
+        assert payload["payment_id"] == str(webhook.payment_id)
+
+    def test_library_rejects_changed_body(self, request_: httpx.Request) -> None:
+        forged = request_.content.replace(b"succeeded", b"failed")
+
+        with pytest.raises(WebhookVerificationError):
+            Webhook(STANDARD_SECRET).verify(forged, dict(request_.headers))
+
+    def test_library_rejects_other_secret(self, request_: httpx.Request) -> None:
+        other_secret = "whsec_" + base64.b64encode(b"x" * 32).decode()
+
+        with pytest.raises(WebhookVerificationError):
+            Webhook(other_secret).verify(request_.content, dict(request_.headers))
+
+    async def test_library_rejects_replayed_old_webhook(
+        self,
+        webhook: PaymentWebhookDTO,
+        mocker: MockerFixture,
+    ) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200)
+
+        # Запрос, перехваченный час назад: подпись верна, но отметка времени устарела.
+        mocker.patch("app.infra.http.webhook.client.utc_now", return_value=utc_now() - timedelta(hours=1))
+        await build_client(handler, secret=STANDARD_SECRET).send(url=TEST_WEBHOOK_URL, data=webhook)
+
+        with pytest.raises(WebhookVerificationError):
+            Webhook(STANDARD_SECRET).verify(requests[0].content, dict(requests[0].headers))
 
 
 def test_broken_standard_secret_fails_on_start() -> None:

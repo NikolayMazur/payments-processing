@@ -25,6 +25,9 @@ package = false
 
 [dependency-groups]
 dev = [
+    "bandit>=1.9.4",
+    "hypothesis>=6.170.15",
+    "mutmut>=3.8.1",
     "mypy>=2.4.1",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.4.1.post1",
@@ -32,6 +35,8 @@ dev = [
     "pytest-env>=1.8.5",
     "pytest-mock>=3.17.0",
     "ruff>=0.17.4",
+    "squawk-cli>=2.71.0",
+    "standardwebhooks>=1.1.0",
 ]
 
 [tool.ruff]
@@ -54,6 +59,8 @@ ignore = ["B008", "B904", "TRY400", "TRY401", "ISC001", "SIM105", "S104", "N818"
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**/*.py" = ["S", "SLF"]
+"**/e2e/**/*.py" = ["S", "SLF"]
+"**/loadtest/**/*.py" = ["S"]
 "**/alembic/versions/*" = ["E501"]
 
 [tool.ruff.lint.mccabe]
@@ -101,3 +108,27 @@ concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "raise NotImplementedError"]
+
+# Мутационное тестирование: make mutation
+# Проверяется логика без ввода-вывода: для неё тесты быстрые, и на каждый мутант уходят доли секунды.
+# run_outbox_relay из этого набора остаётся без тестов, его проверяют тесты процессов.
+[tool.mutmut]
+source_paths = [
+    "src/app/infra/rabbit/retry.py",
+    "src/app/utils.py",
+    "src/app/infra/heartbeat.py",
+    "src/app/infra/http/webhook/client.py",
+    "src/app/api/rest/v1/schemas.py",
+    "src/app/api/cli/outbox.py",
+]
+pytest_add_cli_args_test_selection = [
+    "src/tests/infra/rabbit/test_retry.py",
+    "src/tests/test_utils.py",
+    "src/tests/test_properties.py",
+    "src/tests/infra/test_heartbeat.py",
+    "src/tests/infra/http/test_webhook_client.py",
+    "src/tests/api/rest/test_openapi.py",
+    "src/tests/api/rest/test_schemas.py",
+    "src/tests/api/cli/test_outbox.py",
+]
+also_copy = ["src"]

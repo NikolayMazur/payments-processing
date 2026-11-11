@@ -43,15 +43,19 @@ def db_settings() -> DatabaseSettings:
     return config.DB.model_copy(update={"URL": f"{config.DB.URL}_test"})
 
 
-@pytest.fixture(scope="session", autouse=True)
-async def database(db_settings: DatabaseSettings) -> None:
-    """Пересоздаёт тестовую базу и накатывает схему настоящими миграциями."""
-    url = make_url(db_settings.URL)
+async def recreate_database(db_url: str) -> None:
+    url = make_url(db_url)
     engine = create_async_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")
     async with engine.connect() as conn:
         await conn.execute(text(f'DROP DATABASE IF EXISTS "{url.database}" WITH (FORCE)'))
         await conn.execute(text(f'CREATE DATABASE "{url.database}"'))
     await engine.dispose()
+
+
+@pytest.fixture(scope="session", autouse=True)
+async def database(db_settings: DatabaseSettings) -> None:
+    """Пересоздаёт тестовую базу и накатывает схему настоящими миграциями."""
+    await recreate_database(db_settings.URL)
     run_alembic(db_settings.URL, "upgrade", "head")
 
 
