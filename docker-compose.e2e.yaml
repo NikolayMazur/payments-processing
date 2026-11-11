@@ -1,0 +1,28 @@
+# Дополнение к docker-compose.yaml для сквозных тестов: make e2e
+x-e2e-env: &e2e-env
+  # Секрет только для тестов. Формат Standard Webhooks: whsec_<base64>.
+  WEBHOOK__SECRET: whsec_ZTJlLXRlc3Qtc2VjcmV0LTAxMjM0NTY3ODlhYmNkZWY=
+  # Шлюз отвечает быстрее, чем по умолчанию, но оставляет окно, чтобы остановить консьюмер посреди обработки.
+  GATEWAY__MIN_DELAY_SEC: "2"
+  GATEWAY__MAX_DELAY_SEC: "3"
+
+services:
+  api:
+    environment: *e2e-env
+  consumer:
+    environment: *e2e-env
+  outbox-relay:
+    environment: *e2e-env
+
+  webhook-receiver:
+    image: payments-processing:local
+    command: python /e2e/receiver.py
+    volumes:
+      - ./e2e:/e2e:ro
+    ports:
+      - "8099:8099"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8099/')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

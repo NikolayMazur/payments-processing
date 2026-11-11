@@ -42,5 +42,32 @@ jobs:
         run: make format arg1=--check
       - name: Lint
         run: make lint
+      - name: Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
       - name: Test
         run: make test
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Start services
+        run: make e2e_up
+      - name: End-to-end tests
+        run: uv run pytest e2e -v
+      - name: API fuzzing
+        run: |
+          docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml stop consumer outbox-relay
+          uvx schemathesis@4.33.2 run http://localhost:8000/openapi.json --header 'X-API-Key: local-api-key' \
+            --checks all --exclude-checks negative_data_rejection --generation-allow-x00 false --max-examples 200
+      - name: Service logs
+        if: failure()
+        run: docker compose -f docker-compose.yaml -f docker-compose.e2e.yaml logs --no-color --tail 300
+      - name: Stop services
+        if: always()
+        run: make e2e_down

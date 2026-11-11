@@ -1,0 +1,8 @@
+# Линтер SQL миграций: make squawk
+pg_version = "16"
+excluded_rules = [
+    # varchar с длиной выбран намеренно: это предел ключа идемпотентности и значений enum.
+    "prefer-text-field",
+    # webhook_attempts считает попытки доставки, до предела int ему не дойти.
+    "prefer-bigint-over-int",
+]
